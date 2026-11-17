@@ -1,0 +1,79 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    function isSignedIn() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+
+    function isBootstrapAdmin() {
+      return isSignedIn() &&
+        request.auth.token.email != null &&
+        request.auth.token.email.lower() in [
+          'contactesfaye@gmail.com',
+          'tesfayeteklufeyissa@gmail.com'
+        ];
+    }
+
+    function isStaff() {
+      return isBootstrapAdmin() || (
+        isSignedIn() &&
+        firestore.exists(/databases/(default)/documents/users/$(request.auth.uid)) &&
+        firestore.get(/databases/(default)/documents/users/$(request.auth.uid)).data.role in ['Administrator', 'HR Officer']
+      );
+    }
+
+    function isAuditor() {
+      return isSignedIn() &&
+        firestore.exists(/databases/(default)/documents/users/$(request.auth.uid)) &&
+        firestore.get(/databases/(default)/documents/users/$(request.auth.uid)).data.role == 'Auditor';
+    }
+
+    function isOwnEmployeeFolder(employeeId) {
+      return isSignedIn() &&
+        firestore.exists(/databases/(default)/documents/users/$(request.auth.uid)) &&
+        firestore.get(/databases/(default)/documents/users/$(request.auth.uid)).data.employeeId == employeeId;
+    }
+
+    function isWithinSizeLimit() {
+      return request.resource == null || request.resource.size < 10 * 1024 * 1024;
+    }
+
+    // Corporate branding logos
+    match /branding/{allPaths=**} {
+      allow read: if isSignedIn();
+      allow write: if isStaff() &&
+        isWithinSizeLimit() &&
+        (request.resource == null || request.resource.contentType.matches('image/.*'));
+    }
+
+    // Leave supporting documents scoped by employeeId
+    match /leave_documents/{employeeId}/{allPaths=**} {
+      allow read: if isStaff() || isAuditor() || isOwnEmployeeFolder(employeeId);
+      allow write: if (isStaff() || isOwnEmployeeFolder(employeeId)) && isWithinSizeLimit();
+    }
+
+    // Medical claim receipts scoped by employeeId
+    match /medical_receipts/{employeeId}/{allPaths=**} {
+      allow read: if isStaff() || isAuditor() || isOwnEmployeeFolder(employeeId);
+      allow write: if (isStaff() || isOwnEmployeeFolder(employeeId)) && isWithinSizeLimit();
+    }
+
+    // Employee profile / HR vault documents
+    match /documents/{allPaths=**} {
+      allow read: if isSignedIn();
+      allow write: if isStaff() && isWithinSizeLimit();
+    }
+
+    match /employee_documents/{employeeId}/{allPaths=**} {
+      allow read: if isStaff() || isAuditor() || isOwnEmployeeFolder(employeeId);
+      allow write: if isStaff() && isWithinSizeLimit();
+    }
+
+    // Default deny everything else
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

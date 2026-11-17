@@ -1,0 +1,298 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper functions
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isEmailVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isBootstrapAdmin() {
+      return isEmailVerified() &&
+        request.auth.token.email != null &&
+        request.auth.token.email.lower() in [
+          'contactesfaye@gmail.com',
+          'tesfayeteklufeyissa@gmail.com'
+        ];
+    }
+
+    function userDocExists() {
+      return isSignedIn() && exists(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isAdmin() {
+      return isBootstrapAdmin() || (isEmailVerified() && userDocExists() && getUserData().role == 'Administrator');
+    }
+
+    function isHROfficer() {
+      return isAdmin() || (isEmailVerified() && userDocExists() && getUserData().role == 'HR Officer');
+    }
+
+    function isAuditor() {
+      return isEmailVerified() && userDocExists() && getUserData().role == 'Auditor';
+    }
+
+    function isDepartmentHead() {
+      return isEmailVerified() && userDocExists() && getUserData().role == 'Department Head';
+    }
+
+    function isEmployee() {
+      return isEmailVerified() && userDocExists() && getUserData().role == 'Employee';
+    }
+
+    function isStaff() {
+      return isHROfficer() || isAdmin();
+    }
+
+    function isOwnerEmail(email) {
+      return isEmailVerified() &&
+        request.auth.token.email != null &&
+        email != null &&
+        request.auth.token.email.lower() == email.lower();
+    }
+
+    function isOwnerUid(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+
+    function getEmployeeId() {
+      return userDocExists() ? getUserData().employeeId : null;
+    }
+
+    function isOwnRecord(employeeId) {
+      return isEmailVerified() &&
+        employeeId != null &&
+        getEmployeeId() != null &&
+        getEmployeeId() == employeeId;
+    }
+
+    // Default deny rule
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Connection verification endpoint
+    match /test/connection {
+      allow read: if isSignedIn();
+    }
+
+    // User Accounts collection
+    match /users/{userId} {
+      allow read: if isSignedIn() && (isOwnerUid(userId) || isStaff() || isAuditor());
+      // During registration, newly created user is signed in before email verification:
+      // permit creating their own user doc strictly with Employee role (or Administrator only for designated admin emails)
+      allow create: if isSignedIn() && (
+        isAdmin() ||
+        (
+          isOwnerUid(userId) && (
+            request.resource.data.role == 'Employee' ||
+            (
+              request.auth.token.email != null &&
+              request.auth.token.email.lower() in ['contactesfaye@gmail.com', 'tesfayeteklufeyissa@gmail.com'] &&
+              request.resource.data.role == 'Administrator'
+            )
+          )
+        )
+      );
+      allow update: if isSignedIn() && (
+        isAdmin() ||
+        (
+          isOwnerUid(userId) &&
+          !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role'])
+        )
+      );
+      allow delete: if isAdmin();
+    }
+
+    // Employee Master records
+    match /employees/{empId} {
+      allow read: if isEmailVerified() && (
+        isStaff() ||
+        isAuditor() ||
+        isDepartmentHead() ||
+        isOwnRecord(empId) ||
+        isOwnerEmail(resource.data.email)
+      );
+      allow create, update: if isStaff();
+      allow delete: if isAdmin();
+    }
+
+    // Departments
+    match /departments/{deptId} {
+      allow read: if isEmailVerified();
+      allow write: if isAdmin();
+    }
+
+    // Attendance Records
+    match /attendance/{attId} {
+      allow read: if isEmailVerified() && (
+        isStaff() ||
+        isAuditor() ||
+        isDepartmentHead() ||
+        isOwnRecord(resource.data.employeeId) ||
+        isOwnerEmail(resource.data.employeeEmail)
+      );
+      allow create, update: if isStaff();
+      allow delete: if isStaff();
+    }
+
+    // Leave Applications & Records
+    match /leaves/{leaveId} {
+      allow read: if isEmailVerified() && (
+        isStaff() ||
+        isAuditor() ||
+        isDepartmentHead() ||
+        isOwnRecord(resource.data.employeeId) ||
+        isOwnerEmail(resource.data.employeeEmail)
+      );
+      allow create: if isEmailVerified() && (
+        isStaff() ||
+        isDepartmentHead() ||
+        isOwnRecord(request.resource.data.employeeId)
+      );
+      allow update: if isStaff() || isDepartmentHead() || (
+        isEmployee() &&
+        isOwnRecord(resource.data.employeeId) &&
+        resource.data.status == 'Active' &&
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny(['status', 'recordedBy'])
+      );
+      allow delete: if isStaff();
+    }
+
+    // Payslips & Payroll Records
+    match /payslips/{payslipId} {
+      allow read: if isEmailVerified() && (
+        isStaff() ||
+        isAuditor() ||
+        isOwnRecord(resource.data.employeeId) ||
+        isOwnerEmail(resource.data.recipientEmail)
+      );
+      allow write: if isStaff();
+      allow delete: if isAdmin();
+    }
+
+    match /payroll_records/{recordId} {
+      allow read: if isEmailVerified() && (
+        isStaff() ||
+        isAuditor() ||
+        isOwnRecord(resource.data.employeeId) ||
+        isOwnerEmail(resource.data.employeeEmail)
+      );
+      allow write: if isStaff();
+      allow delete: if isAdmin();
+    }
+
+    // Salary Components & Periods
+    match /salary_components/{compId} {
+      allow read: if isEmailVerified();
+      allow write: if isAdmin();
+    }
+
+    match /payroll_periods/{periodId} {
+      allow read: if isEmailVerified();
+      allow write: if isAdmin();
+    }
+
+    match /employee_salary_structures/{structId} {
+      allow read: if isEmailVerified() && (isStaff() || isAuditor() || isOwnRecord(resource.data.employeeId));
+      allow write: if isStaff();
+    }
+
+    // Family Members & Medical Expenses
+    match /family_members/{fmId} {
+      allow read: if isEmailVerified() && (isStaff() || isAuditor() || isOwnRecord(resource.data.employeeId));
+      allow create, update: if isEmailVerified() && (isStaff() || isOwnRecord(request.resource.data.employeeId));
+      allow delete: if isStaff();
+    }
+
+    match /medical_expenses/{expId} {
+      allow read: if isEmailVerified() && (isStaff() || isAuditor() || isOwnRecord(resource.data.employeeId));
+      allow create, update: if isEmailVerified() && (isStaff() || isOwnRecord(request.resource.data.employeeId));
+      allow delete: if isStaff();
+    }
+
+    match /tax_configurations/{taxId} {
+      allow read: if isEmailVerified();
+      allow write: if isAdmin();
+    }
+
+    match /payroll_approvals/{approvalId} {
+      allow read: if isEmailVerified() && (isStaff() || isAuditor());
+      allow write: if isStaff();
+    }
+
+    match /payroll_import_logs/{logId} {
+      allow read: if isEmailVerified() && (isStaff() || isAuditor());
+      allow write: if isStaff();
+    }
+
+    match /payroll_settings/{settingId} {
+      allow read: if isEmailVerified();
+      allow write: if isAdmin();
+    }
+
+    match /payslip_distribution_logs/{logId} {
+      allow read: if isEmailVerified() && (isStaff() || isAuditor());
+      allow write: if isStaff();
+    }
+
+    // System Roles & Dynamic Role Permissions (RBAC)
+    match /roles/{roleId} {
+      allow read: if isEmailVerified();
+      allow write: if isAdmin();
+    }
+
+    match /role_permissions/{permId} {
+      allow read: if isEmailVerified();
+      allow write: if isAdmin();
+    }
+
+    // Company Config & Public Holidays & Activity Logs
+    match /config/{configId} {
+      allow read: if isEmailVerified();
+      allow write: if isAdmin();
+    }
+
+    match /holidays/{holidayId} {
+      allow read: if isEmailVerified();
+      allow write: if isStaff();
+    }
+
+    match /logs/{logId} {
+      allow read: if isStaff() || isAuditor();
+      allow create: if isEmailVerified();
+      allow update, delete: if isAdmin();
+    }
+
+    match /email_logs/{logId} {
+      allow read: if isStaff() || isAuditor();
+      allow create: if isEmailVerified();
+      allow update, delete: if isAdmin();
+    }
+
+    match /email_delivery_logs/{logId} {
+      allow read: if isStaff() || isAuditor();
+      allow write: if isAdmin();
+    }
+
+    match /drive_associations/{assocId} {
+      allow read: if isEmailVerified() && (
+        isStaff() ||
+        isAuditor() ||
+        (resource.data.targetType == 'Employee' && isOwnRecord(resource.data.targetId)) ||
+        resource.data.targetType == 'Department'
+      );
+      allow create, update: if isStaff();
+      allow delete: if isAdmin() || isHROfficer();
+    }
+  }
+}

@@ -19,6 +19,16 @@ import {
   Mail, Send, Check, X, ArrowRight, TrendingUp, Users, Building2, 
   ShieldAlert, History, Award, CheckSquare, XCircle, Clock, ChevronRight
 } from "lucide-react";
+import CompanyReportHeader from "./reports/CompanyReportHeader";
+import ReportPrintButton from "./reports/ReportPrintButton";
+import ReportPDFExportButton from "./reports/ReportPDFExportButton";
+import {
+  formatReportDateTime,
+  getCompanyLogoUrl,
+  getDefaultEmblemDataUri,
+  ReportExportPayload
+} from "../utils/reportBranding";
+import { printStructuredReport } from "../utils/reportPrint";
 
 interface PayrollManagementProps {
   employees: Employee[];
@@ -1010,10 +1020,477 @@ export default function PayrollManagement({
   };
 
   // ==========================================
-  // VIEW 9: PAYROLL REPORTS STATE
+  // VIEW 9: PAYROLL REPORTS STATE & BUILDERS
   // ==========================================
   const [reportType, setReportType] = useState<string>("monthly_summary");
   const [reportDept, setReportDept] = useState<string>("");
+
+  const filteredReportRecords = useMemo(() => {
+    return currentPeriodRecords.filter(r => !reportDept || r.departmentId === reportDept);
+  }, [currentPeriodRecords, reportDept]);
+
+  const previousPeriodRecords = useMemo(() => {
+    const idx = payrollPeriods.findIndex(p => p.id === selectedPeriod.id);
+    const prevPeriod = idx >= 0 && idx + 1 < payrollPeriods.length
+      ? payrollPeriods[idx + 1]
+      : payrollPeriods.find(p => p.id !== selectedPeriod.id);
+    if (!prevPeriod) return [];
+    return payrollRecords.filter(r => r.payrollPeriodId === prevPeriod.id && isRecordInScope(r.employeeId, r.departmentId));
+  }, [payrollPeriods, payrollRecords, selectedPeriod.id]);
+
+  const filteredDistributionLogs = useMemo(() => {
+    return payslipDistributionLogs.filter(log => {
+      if (log.payrollPeriodId !== selectedPeriod.id) return false;
+      const emp = employees.find(e => e.employeeId === log.employeeId);
+      if (!isRecordInScope(log.employeeId, emp?.departmentId)) return false;
+      if (reportDept && emp?.departmentId !== reportDept) return false;
+      return true;
+    });
+  }, [payslipDistributionLogs, selectedPeriod.id, employees, reportDept]);
+
+  const getReportDeptLabel = () => {
+    if (!reportDept) return "All Departments";
+    return departments.find(d => d.id === reportDept)?.name || reportDept;
+  };
+
+  const buildPayrollReportPayload = (): ReportExportPayload => {
+    const deptLabel = getReportDeptLabel();
+    const generatedAt = formatReportDateTime();
+    const generatedBy = currentUser?.fullName || currentUser?.email || "HR Operator";
+
+    if (reportType === "tax_schedule") {
+      const totalGross = filteredReportRecords.reduce((s, r) => s + r.grossSalary, 0);
+      const totalExempt = filteredReportRecords.reduce((s, r) => s + r.taxExemptEarnings, 0);
+      const totalTaxable = filteredReportRecords.reduce((s, r) => s + r.taxableEarnings, 0);
+      const totalPit = filteredReportRecords.reduce((s, r) => s + r.incomeTax, 0);
+      const totalNet = filteredReportRecords.reduce((s, r) => s + r.netSalary, 0);
+      return {
+        reportTitle: "Employment Income Tax (PIT) Schedule",
+        reportSubtitle: "Statutory Ethiopian Progressive Income Tax Filing Statement",
+        filePrefix: "Payroll_PIT_Schedule",
+        reportingPeriod: selectedPeriod.periodName,
+        departmentOrUnit: deptLabel,
+        generatedAt,
+        generatedBy,
+        orientation: "landscape",
+        summaryMetrics: [
+          { label: "Employees Taxed", value: String(filteredReportRecords.length) },
+          { label: "Total Taxable Income", value: `${totalTaxable.toLocaleString()} ETB` },
+          { label: "Total Income Tax (PIT)", value: `${totalPit.toLocaleString()} ETB` },
+          { label: "Total Net Pay", value: `${totalNet.toLocaleString()} ETB` }
+        ],
+        columns: [
+          { header: "Employee ID", align: "left" },
+          { header: "Full Name", align: "left" },
+          { header: "Department", align: "left" },
+          { header: "Gross Salary", align: "right" },
+          { header: "Tax Exempt", align: "right" },
+          { header: "Taxable Income", align: "right" },
+          { header: "Income Tax (PIT)", align: "right" },
+          { header: "Net Salary", align: "right" }
+        ],
+        rows: filteredReportRecords.map(r => [
+          r.employeeId,
+          r.employeeName,
+          r.departmentName,
+          `${r.grossSalary.toLocaleString()} ETB`,
+          `${r.taxExemptEarnings.toLocaleString()} ETB`,
+          `${r.taxableEarnings.toLocaleString()} ETB`,
+          `${r.incomeTax.toLocaleString()} ETB`,
+          `${r.netSalary.toLocaleString()} ETB`
+        ]),
+        totalsRow: [
+          `TOTAL (${filteredReportRecords.length})`,
+          "",
+          "",
+          `${totalGross.toLocaleString()} ETB`,
+          `${totalExempt.toLocaleString()} ETB`,
+          `${totalTaxable.toLocaleString()} ETB`,
+          `${totalPit.toLocaleString()} ETB`,
+          `${totalNet.toLocaleString()} ETB`
+        ]
+      };
+    }
+
+    if (reportType === "pension_schedule") {
+      const totalBasic = filteredReportRecords.reduce((s, r) => s + r.basicSalary, 0);
+      const totalEmpPen = filteredReportRecords.reduce((s, r) => s + r.employeePension, 0);
+      const totalErPen = filteredReportRecords.reduce((s, r) => s + r.employerPension, 0);
+      const grandPension = totalEmpPen + totalErPen;
+      return {
+        reportTitle: "Pension Contribution Schedule (7% + 11%)",
+        reportSubtitle: "Statutory Private Organizations Employees' Social Security Contribution",
+        filePrefix: "Payroll_Pension_Schedule",
+        reportingPeriod: selectedPeriod.periodName,
+        departmentOrUnit: deptLabel,
+        generatedAt,
+        generatedBy,
+        orientation: "landscape",
+        summaryMetrics: [
+          { label: "Covered Staff", value: String(filteredReportRecords.length) },
+          { label: "Employee Pension (7%)", value: `${totalEmpPen.toLocaleString()} ETB` },
+          { label: "Employer Pension (11%)", value: `${totalErPen.toLocaleString()} ETB` },
+          { label: "Total Contribution (18%)", value: `${grandPension.toLocaleString()} ETB` }
+        ],
+        columns: [
+          { header: "Employee ID", align: "left" },
+          { header: "Full Name", align: "left" },
+          { header: "Department", align: "left" },
+          { header: "Basic Salary", align: "right" },
+          { header: "Employee (7%)", align: "right" },
+          { header: "Employer (11%)", align: "right" },
+          { header: "Total Pension (18%)", align: "right" }
+        ],
+        rows: filteredReportRecords.map(r => [
+          r.employeeId,
+          r.employeeName,
+          r.departmentName,
+          `${r.basicSalary.toLocaleString()} ETB`,
+          `${r.employeePension.toLocaleString()} ETB`,
+          `${r.employerPension.toLocaleString()} ETB`,
+          `${(r.employeePension + r.employerPension).toLocaleString()} ETB`
+        ]),
+        totalsRow: [
+          `TOTAL (${filteredReportRecords.length})`,
+          "",
+          "",
+          `${totalBasic.toLocaleString()} ETB`,
+          `${totalEmpPen.toLocaleString()} ETB`,
+          `${totalErPen.toLocaleString()} ETB`,
+          `${grandPension.toLocaleString()} ETB`
+        ]
+      };
+    }
+
+    if (reportType === "net_disbursement") {
+      const totalGross = filteredReportRecords.reduce((s, r) => s + r.grossSalary, 0);
+      const totalDed = filteredReportRecords.reduce((s, r) => s + r.totalDeductions, 0);
+      const totalNet = filteredReportRecords.reduce((s, r) => s + r.netSalary, 0);
+      return {
+        reportTitle: "Net Salary Disbursement Report",
+        reportSubtitle: "Authorized Bank Transfer & Employee Net Remuneration Schedule",
+        filePrefix: "Payroll_Net_Disbursement",
+        reportingPeriod: selectedPeriod.periodName,
+        departmentOrUnit: deptLabel,
+        generatedAt,
+        generatedBy,
+        orientation: "landscape",
+        summaryMetrics: [
+          { label: "Payees Count", value: String(filteredReportRecords.length) },
+          { label: "Total Gross", value: `${totalGross.toLocaleString()} ETB` },
+          { label: "Total Deductions", value: `${totalDed.toLocaleString()} ETB` },
+          { label: "Net Bank Transfer", value: `${totalNet.toLocaleString()} ETB` }
+        ],
+        columns: [
+          { header: "Employee ID", align: "left" },
+          { header: "Full Name", align: "left" },
+          { header: "Department", align: "left" },
+          { header: "Position", align: "left" },
+          { header: "Gross Salary", align: "right" },
+          { header: "Total Deductions", align: "right" },
+          { header: "Net Disbursement", align: "right" },
+          { header: "Status", align: "center" }
+        ],
+        rows: filteredReportRecords.map(r => [
+          r.employeeId,
+          r.employeeName,
+          r.departmentName,
+          r.position,
+          `${r.grossSalary.toLocaleString()} ETB`,
+          `${r.totalDeductions.toLocaleString()} ETB`,
+          `${r.netSalary.toLocaleString()} ETB`,
+          r.status
+        ]),
+        totalsRow: [
+          `TOTAL (${filteredReportRecords.length})`,
+          "",
+          "",
+          "",
+          `${totalGross.toLocaleString()} ETB`,
+          `${totalDed.toLocaleString()} ETB`,
+          `${totalNet.toLocaleString()} ETB`,
+          ""
+        ]
+      };
+    }
+
+    if (reportType === "variance_report") {
+      let totPrevGross = 0;
+      let totCurrGross = 0;
+      let totPrevNet = 0;
+      let totCurrNet = 0;
+      const rows = filteredReportRecords.map(r => {
+        const prev = previousPeriodRecords.find(p => p.employeeId === r.employeeId);
+        const pGross = prev?.grossSalary || 0;
+        const pNet = prev?.netSalary || 0;
+        const gVar = r.grossSalary - pGross;
+        const nVar = r.netSalary - pNet;
+        totPrevGross += pGross;
+        totCurrGross += r.grossSalary;
+        totPrevNet += pNet;
+        totCurrNet += r.netSalary;
+        return [
+          r.employeeId,
+          r.employeeName,
+          r.departmentName,
+          `${pGross.toLocaleString()} ETB`,
+          `${r.grossSalary.toLocaleString()} ETB`,
+          `${gVar >= 0 ? "+" : ""}${gVar.toLocaleString()} ETB`,
+          `${pNet.toLocaleString()} ETB`,
+          `${r.netSalary.toLocaleString()} ETB`,
+          `${nVar >= 0 ? "+" : ""}${nVar.toLocaleString()} ETB`
+        ];
+      });
+      const totGVar = totCurrGross - totPrevGross;
+      const totNVar = totCurrNet - totPrevNet;
+      return {
+        reportTitle: "Payroll Variance Analysis Report",
+        reportSubtitle: "Period-over-Period Gross & Net Salary Variance Audit",
+        filePrefix: "Payroll_Variance_Report",
+        reportingPeriod: selectedPeriod.periodName,
+        departmentOrUnit: deptLabel,
+        generatedAt,
+        generatedBy,
+        orientation: "landscape",
+        summaryMetrics: [
+          { label: "Staff Compared", value: String(filteredReportRecords.length) },
+          { label: "Current Gross", value: `${totCurrGross.toLocaleString()} ETB` },
+          { label: "Gross Variance", value: `${totGVar >= 0 ? "+" : ""}${totGVar.toLocaleString()} ETB` },
+          { label: "Net Variance", value: `${totNVar >= 0 ? "+" : ""}${totNVar.toLocaleString()} ETB` }
+        ],
+        columns: [
+          { header: "Employee ID", align: "left" },
+          { header: "Full Name", align: "left" },
+          { header: "Department", align: "left" },
+          { header: "Prev Gross", align: "right" },
+          { header: "Curr Gross", align: "right" },
+          { header: "Gross Variance", align: "right" },
+          { header: "Prev Net", align: "right" },
+          { header: "Curr Net", align: "right" },
+          { header: "Net Variance", align: "right" }
+        ],
+        rows,
+        totalsRow: [
+          `TOTAL (${filteredReportRecords.length})`,
+          "",
+          "",
+          `${totPrevGross.toLocaleString()} ETB`,
+          `${totCurrGross.toLocaleString()} ETB`,
+          `${totGVar >= 0 ? "+" : ""}${totGVar.toLocaleString()} ETB`,
+          `${totPrevNet.toLocaleString()} ETB`,
+          `${totCurrNet.toLocaleString()} ETB`,
+          `${totNVar >= 0 ? "+" : ""}${totNVar.toLocaleString()} ETB`
+        ]
+      };
+    }
+
+    if (reportType === "email_distribution") {
+      const sentCount = filteredDistributionLogs.filter(l => l.deliveryStatus === "Sent").length;
+      const failedCount = filteredDistributionLogs.filter(l => l.deliveryStatus === "Failed").length;
+      return {
+        reportTitle: "Payslip Email Distribution Log Report",
+        reportSubtitle: "Electronic Payslip Delivery Audit Trail",
+        filePrefix: "Payroll_Email_Distribution",
+        reportingPeriod: selectedPeriod.periodName,
+        departmentOrUnit: deptLabel,
+        generatedAt,
+        generatedBy,
+        orientation: "landscape",
+        summaryMetrics: [
+          { label: "Total Dispatches", value: String(filteredDistributionLogs.length) },
+          { label: "Sent Successfully", value: String(sentCount) },
+          { label: "Failed / Blocked", value: String(failedCount) }
+        ],
+        columns: [
+          { header: "Employee ID", align: "left" },
+          { header: "Employee Name", align: "left" },
+          { header: "Recipient Email", align: "left" },
+          { header: "Period", align: "left" },
+          { header: "Sent Date & Time", align: "left" },
+          { header: "Status", align: "center" },
+          { header: "Dispatched By", align: "left" }
+        ],
+        rows: filteredDistributionLogs.map(log => [
+          log.employeeId,
+          log.employeeName,
+          log.recipientEmail,
+          log.payrollPeriodName,
+          log.sendingDate,
+          log.deliveryStatus,
+          log.sentBy
+        ]),
+        emptyMessage: "No payslip distribution events recorded for this period."
+      };
+    }
+
+    // Default: Monthly Payroll Summary
+    const totalBasic = filteredReportRecords.reduce((s, r) => s + r.basicSalary, 0);
+    const totalAllowances = filteredReportRecords.reduce(
+      (s, r) => s + r.positionAllowance + r.transportAllowance + r.housingAllowance + r.responsibilityAllowance + r.telephoneAllowance + r.overtime + r.otherEarnings,
+      0
+    );
+    const totalGross = filteredReportRecords.reduce((s, r) => s + r.grossSalary, 0);
+    const totalTax = filteredReportRecords.reduce((s, r) => s + r.incomeTax, 0);
+    const totalEmpPen = filteredReportRecords.reduce((s, r) => s + r.employeePension, 0);
+    const totalNet = filteredReportRecords.reduce((s, r) => s + r.netSalary, 0);
+
+    return {
+      reportTitle: "Monthly Payroll Summary Report",
+      reportSubtitle: "Consolidated Gross Earnings, Statutory Deductions & Net Disbursement",
+      filePrefix: "Payroll_Report",
+      reportingPeriod: selectedPeriod.periodName,
+      departmentOrUnit: deptLabel,
+      generatedAt,
+      generatedBy,
+      orientation: "landscape",
+      summaryMetrics: [
+        { label: "Employees Paid", value: String(filteredReportRecords.length) },
+        { label: "Total Gross Payroll", value: `${totalGross.toLocaleString()} ETB` },
+        { label: "Total Tax & Pension", value: `${(totalTax + totalEmpPen).toLocaleString()} ETB` },
+        { label: "Total Net Payable", value: `${totalNet.toLocaleString()} ETB` }
+      ],
+      columns: [
+        { header: "Employee ID", align: "left" },
+        { header: "Full Name", align: "left" },
+        { header: "Department", align: "left" },
+        { header: "Basic Salary", align: "right" },
+        { header: "Allowances", align: "right" },
+        { header: "Gross Salary", align: "right" },
+        { header: "Income Tax", align: "right" },
+        { header: "Emp. Pension", align: "right" },
+        { header: "Net Salary", align: "right" }
+      ],
+      rows: filteredReportRecords.map(r => {
+        const allowances =
+          r.positionAllowance + r.transportAllowance + r.housingAllowance + r.responsibilityAllowance + r.telephoneAllowance + r.overtime + r.otherEarnings;
+        return [
+          r.employeeId,
+          r.employeeName,
+          r.departmentName,
+          `${r.basicSalary.toLocaleString()} ETB`,
+          `${allowances.toLocaleString()} ETB`,
+          `${r.grossSalary.toLocaleString()} ETB`,
+          `${r.incomeTax.toLocaleString()} ETB`,
+          `${r.employeePension.toLocaleString()} ETB`,
+          `${r.netSalary.toLocaleString()} ETB`
+        ];
+      }),
+      totalsRow: [
+        `TOTAL (${filteredReportRecords.length})`,
+        "",
+        "",
+        `${totalBasic.toLocaleString()} ETB`,
+        `${totalAllowances.toLocaleString()} ETB`,
+        `${totalGross.toLocaleString()} ETB`,
+        `${totalTax.toLocaleString()} ETB`,
+        `${totalEmpPen.toLocaleString()} ETB`,
+        `${totalNet.toLocaleString()} ETB`
+      ]
+    };
+  };
+
+  const handleExportReportExcel = () => {
+    const payload = buildPayrollReportPayload();
+    const escapeCsv = (val: string | number) => `"${String(val ?? "").replace(/"/g, '""')}"`;
+    const lines: string[] = [];
+    lines.push(payload.columns.map(c => escapeCsv(c.header)).join(","));
+    payload.rows.forEach(row => {
+      lines.push(row.map(escapeCsv).join(","));
+    });
+    if (payload.totalsRow && payload.rows.length > 0) {
+      lines.push(payload.totalsRow.map(escapeCsv).join(","));
+    }
+    const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${payload.filePrefix}_${selectedPeriod.periodName.replace(/\s+/g, "_")}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+    onLogAction("PayrollReports", "Export Payroll Report CSV", payload.reportTitle, `Exported ${payload.reportTitle} (${selectedPeriod.periodName})`);
+  };
+
+  const buildPayslipReportPayload = (ps: Payslip): ReportExportPayload => ({
+    reportTitle: "Official Employee Salary Payslip",
+    reportSubtitle: "Confidential Salary Remuneration Statement",
+    filePrefix: `Payslip_${ps.payslipRefNo}`,
+    reportingPeriod: ps.payrollPeriodName,
+    departmentOrUnit: ps.department,
+    generatedAt: ps.generatedDate || formatReportDateTime(),
+    generatedBy: ps.generatedBy || currentUser?.fullName || "HR Payroll",
+    referenceNo: ps.payslipRefNo,
+    orientation: "portrait",
+    columns: [
+      { header: "Item", align: "left" },
+      { header: "Amount", align: "right" }
+    ],
+    rows: [],
+    payslipData: {
+      employeeName: ps.employeeName,
+      employeeId: ps.employeeId,
+      position: ps.position,
+      department: ps.department,
+      periodName: ps.payrollPeriodName,
+      paymentDate: ps.paymentDate,
+      refNo: ps.payslipRefNo,
+      earnings: ps.earningsBreakdown,
+      deductions: ps.deductionsBreakdown,
+      grossSalary: ps.grossSalary,
+      totalDeductions: ps.totalDeductions,
+      netSalary: ps.netSalary,
+      employerPension: ps.employerPension,
+      currency: "ETB"
+    }
+  });
+
+  const buildPayrollHistoryPayload = (): ReportExportPayload => {
+    const totalDisbursed = payrollPeriods.reduce((sum, p) => {
+      const pRecords = payrollRecords.filter(r => r.payrollPeriodId === p.id && isRecordInScope(r.employeeId, r.departmentId));
+      return sum + pRecords.reduce((s, r) => s + r.netSalary, 0);
+    }, 0);
+    return {
+      reportTitle: "Historical Payroll & Audit Log Report",
+      reportSubtitle: "Archive of Payroll Periods, Approvals & Net Disbursements",
+      filePrefix: "Payroll_History_Report",
+      generatedAt: formatReportDateTime(),
+      generatedBy: currentUser?.fullName || currentUser?.email || "HR Operator",
+      orientation: "landscape",
+      summaryMetrics: [
+        { label: "Total Periods", value: String(payrollPeriods.length) },
+        { label: "Cumulative Net Disbursed", value: `${totalDisbursed.toLocaleString()} ETB` }
+      ],
+      columns: [
+        { header: "Period", align: "left" },
+        { header: "Approved / Created Date", align: "left" },
+        { header: "Approved / Created By", align: "left" },
+        { header: "Staff Count", align: "center" },
+        { header: "Total Net Disbursement", align: "right" },
+        { header: "Status", align: "center" }
+      ],
+      rows: payrollPeriods.map(p => {
+        const pRecords = payrollRecords.filter(r => r.payrollPeriodId === p.id && isRecordInScope(r.employeeId, r.departmentId));
+        const net = pRecords.reduce((s, r) => s + r.netSalary, 0);
+        return [
+          p.periodName,
+          p.approvedDate || p.createdDate,
+          p.approvedBy || p.createdBy,
+          pRecords.length,
+          `${net.toLocaleString()} ETB`,
+          p.status
+        ];
+      }),
+      totalsRow: [
+        `TOTAL (${payrollPeriods.length} Periods)`,
+        "",
+        "",
+        "",
+        `${totalDisbursed.toLocaleString()} ETB`,
+        ""
+      ]
+    };
+  };
 
   // Screen metadata map for breadcrumb, screen title, subtitle, tag, icon, and action button
   const screenMeta = useMemo(() => {
@@ -1090,7 +1567,7 @@ export default function PayrollManagement({
           icon: FileText,
           actionButton: selectedPayslip && canExport ? (
             <button
-              onClick={() => window.print()}
+              onClick={() => printStructuredReport(buildPayslipReportPayload(selectedPayslip), companyConfig || undefined)}
               className="px-3.5 py-2 bg-primary-custom text-white font-bold text-xs rounded-lg flex items-center gap-1.5 shadow-2xs transition-all uppercase tracking-wider shrink-0"
             >
               <Printer className="h-4 w-4 text-accent-custom" />
@@ -1138,7 +1615,7 @@ export default function PayrollManagement({
           icon: FileSpreadsheet,
           actionButton: canExport ? (
             <button
-              onClick={() => window.print()}
+              onClick={() => printStructuredReport(buildPayrollReportPayload(), companyConfig || undefined)}
               className="px-3.5 py-2 bg-primary-custom text-white font-bold text-xs rounded-lg flex items-center gap-1.5 shadow-2xs transition-all uppercase tracking-wider shrink-0"
             >
               <Printer className="h-4 w-4 text-accent-custom" />
@@ -2330,105 +2807,189 @@ export default function PayrollManagement({
       {/* ========================================== */}
       {/* SUBMENU 9: PAYROLL REPORTS */}
       {/* ========================================== */}
-      {activeSubTab === "reports" && (
-        <div className="space-y-6 animate-in fade-in duration-200">
-          <div className="bg-white p-6 border rounded-xl shadow-2xs space-y-4">
-            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 border-b pb-4">
-              <div className="flex items-center gap-2">
-                <span className="p-2 bg-primary-custom text-accent-custom rounded-lg">
-                  <FileSpreadsheet className="h-5 w-5" />
-                </span>
-                <h3 className="text-xs font-extrabold text-slate-800 uppercase">Ethio-Re Statutory Payroll Reports Center</h3>
+      {activeSubTab === "reports" && (() => {
+        const payrollReportPayload = buildPayrollReportPayload();
+        return (
+          <div className="space-y-6 animate-in fade-in duration-200">
+            <div className="bg-white p-6 border rounded-xl shadow-2xs space-y-4">
+              <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 border-b pb-4">
+                <div className="flex items-center gap-2">
+                  <span className="p-2 bg-primary-custom text-accent-custom rounded-lg">
+                    <FileSpreadsheet className="h-5 w-5" />
+                  </span>
+                  <h3 className="text-xs font-extrabold text-slate-800 uppercase">Ethio-Re Statutory Payroll Reports Center</h3>
+                </div>
+
+                {canExport && (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <ReportPrintButton
+                      printData={buildPayrollReportPayload}
+                      companyConfig={companyConfig || undefined}
+                      label="Print"
+                    />
+                    <ReportPDFExportButton
+                      reportData={buildPayrollReportPayload}
+                      companyConfig={companyConfig || undefined}
+                      label="Export PDF"
+                    />
+                    <button
+                      type="button"
+                      onClick={handleExportReportExcel}
+                      className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-lg flex items-center gap-1.5 shadow-2xs transition-colors whitespace-nowrap"
+                    >
+                      <Download className="h-3.5 w-3.5" /> Export Excel
+                    </button>
+                  </div>
+                )}
               </div>
 
-              {canExport && (
-                <div className="flex gap-2">
-                  <button
-                    onClick={() => window.print()}
-                    className="px-3.5 py-1.5 bg-slate-700 hover:bg-slate-800 text-white font-bold text-xs rounded-lg flex items-center gap-1.5 shadow-2xs"
+              <div className="flex flex-wrap gap-3 text-xs">
+                <div className="w-full sm:w-72">
+                  <label className="block text-[10px] font-bold text-slate-400 uppercase mb-1">Select Report Type</label>
+                  <select
+                    value={reportType}
+                    onChange={(e) => setReportType(e.target.value)}
+                    className="w-full p-2 border rounded-lg font-bold bg-white"
                   >
-                    <Printer className="h-3.5 w-3.5" /> Print / Save PDF
-                  </button>
+                    <option value="monthly_summary">1. Monthly Payroll Summary</option>
+                    <option value="tax_schedule">2. Employment Income Tax (PIT) Schedule</option>
+                    <option value="pension_schedule">3. Pension Contribution Schedule (7% + 11%)</option>
+                    <option value="net_disbursement">4. Net Salary Disbursement Report</option>
+                    <option value="variance_report">5. Payroll Variance Analysis Report</option>
+                    <option value="email_distribution">6. Payslip Email Distribution Log</option>
+                  </select>
                 </div>
-              )}
-            </div>
-
-            <div className="flex flex-wrap gap-3 text-xs">
-              <div className="w-64">
-                <label className="block text-[10px] font-bold text-slate-400 uppercase mb-1">Select Report Type</label>
-                <select
-                  value={reportType}
-                  onChange={(e) => setReportType(e.target.value)}
-                  className="w-full p-2 border rounded-lg font-bold bg-white"
-                >
-                  <option value="monthly_summary">1. Monthly Payroll Summary</option>
-                  <option value="tax_schedule">2. Employment Income Tax (PIT) Schedule</option>
-                  <option value="pension_schedule">3. Pension Contribution Schedule (7% + 11%)</option>
-                  <option value="net_disbursement">4. Net Salary Disbursement Report</option>
-                  <option value="variance_report">5. Payroll Variance Analysis Report</option>
-                  <option value="email_distribution">6. Payslip Email Distribution Log</option>
-                </select>
-              </div>
-            </div>
-
-            {/* Printable Report Canvas */}
-            <div className="bg-white border p-8 rounded-xl shadow-2xs printable-canvas space-y-6">
-              <div className="border-b-2 border-primary-custom pb-4 flex justify-between items-center">
-                <div>
-                  <h1 className="font-black text-slate-800 text-base uppercase">ETHIOPIAN REINSURANCE SHARE COMPANY</h1>
-                  <p className="text-xs font-bold text-primary-custom">{reportType.toUpperCase().replace("_", " ")} REPORT • {selectedPeriod.periodName}</p>
-                </div>
-                <div className="text-right text-[10px] text-slate-400 font-semibold">
-                  <p>Date Generated: {new Date().toISOString().split("T")[0]}</p>
-                  <p>Currency: ETB</p>
-                </div>
+                {!isDeptHead && currentUser?.role !== "Employee" && (
+                  <div className="w-full sm:w-64">
+                    <label className="block text-[10px] font-bold text-slate-400 uppercase mb-1">Department Filter</label>
+                    <select
+                      value={reportDept}
+                      onChange={(e) => setReportDept(e.target.value)}
+                      className="w-full p-2 border rounded-lg font-bold bg-white"
+                    >
+                      <option value="">All Departments</option>
+                      {departments.map(d => (
+                        <option key={d.id} value={d.id}>{d.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
               </div>
 
-              <div className="overflow-x-auto">
-                <table className="w-full text-left text-xs border-collapse">
-                  <thead>
-                    <tr className="bg-slate-100 border-b text-[10px] font-bold text-slate-600 uppercase">
-                      <th className="p-2.5">Employee ID</th>
-                      <th className="p-2.5">Full Name</th>
-                      <th className="p-2.5">Department</th>
-                      <th className="p-2.5 text-right">Basic Salary</th>
-                      <th className="p-2.5 text-right">Gross Salary</th>
-                      <th className="p-2.5 text-right">Income Tax</th>
-                      <th className="p-2.5 text-right">Employee Pension</th>
-                      <th className="p-2.5 text-right font-extrabold">Net Salary</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y text-slate-800">
-                    {currentPeriodRecords.map(r => (
-                      <tr key={r.id}>
-                        <td className="p-2.5 font-bold text-primary-custom">{r.employeeId}</td>
-                        <td className="p-2.5 font-bold">{r.employeeName}</td>
-                        <td className="p-2.5 text-slate-600">{r.departmentName}</td>
-                        <td className="p-2.5 text-right font-semibold">{r.basicSalary.toLocaleString()} ETB</td>
-                        <td className="p-2.5 text-right font-bold">{r.grossSalary.toLocaleString()} ETB</td>
-                        <td className="p-2.5 text-right text-rose-600 font-bold">{r.incomeTax.toLocaleString()} ETB</td>
-                        <td className="p-2.5 text-right text-blue-600 font-bold">{r.employeePension.toLocaleString()} ETB</td>
-                        <td className="p-2.5 text-right font-black text-emerald-800">{r.netSalary.toLocaleString()} ETB</td>
-                      </tr>
+              {/* Printable Branded Report Canvas */}
+              <div className="bg-white border p-6 md:p-8 rounded-xl shadow-2xs printable-canvas space-y-6">
+                <CompanyReportHeader
+                  companyConfig={companyConfig || undefined}
+                  reportTitle={payrollReportPayload.reportTitle}
+                  reportSubtitle={payrollReportPayload.reportSubtitle}
+                  reportingPeriod={payrollReportPayload.reportingPeriod}
+                  departmentOrUnit={payrollReportPayload.departmentOrUnit}
+                  generatedAt={payrollReportPayload.generatedAt}
+                  generatedBy={payrollReportPayload.generatedBy}
+                  extraMeta={[{ label: "Currency", value: "ETB" }]}
+                />
+
+                {payrollReportPayload.summaryMetrics && payrollReportPayload.summaryMetrics.length > 0 && (
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+                    {payrollReportPayload.summaryMetrics.map((m, idx) => (
+                      <div key={idx} className="bg-slate-50 border border-slate-200 rounded-lg p-3">
+                        <span className="text-[10px] font-bold text-slate-400 uppercase block">{m.label}</span>
+                        <span className="text-sm font-black text-slate-800 mt-0.5 block">{m.value}</span>
+                      </div>
                     ))}
-                  </tbody>
-                </table>
+                  </div>
+                )}
+
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-xs border-collapse">
+                    <thead>
+                      <tr className="bg-slate-100 border-b text-[10px] font-bold text-slate-600 uppercase">
+                        {payrollReportPayload.columns.map((col, idx) => (
+                          <th
+                            key={idx}
+                            className={`p-2.5 ${
+                              col.align === "right" ? "text-right" : col.align === "center" ? "text-center" : "text-left"
+                            }`}
+                          >
+                            {col.header}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y text-slate-800">
+                      {payrollReportPayload.rows.length === 0 ? (
+                        <tr>
+                          <td colSpan={payrollReportPayload.columns.length} className="p-8 text-center text-slate-400">
+                            {payrollReportPayload.emptyMessage || "No payroll records match the selected filters."}
+                          </td>
+                        </tr>
+                      ) : (
+                        payrollReportPayload.rows.map((row, rIdx) => (
+                          <tr key={rIdx} className="hover:bg-slate-50/50">
+                            {payrollReportPayload.columns.map((col, cIdx) => (
+                              <td
+                                key={cIdx}
+                                className={`p-2.5 ${
+                                  cIdx === 0 ? "font-bold text-primary-custom" : cIdx === 1 ? "font-bold" : "font-medium text-slate-700"
+                                } ${col.align === "right" ? "text-right" : col.align === "center" ? "text-center" : "text-left"}`}
+                              >
+                                {row[cIdx]}
+                              </td>
+                            ))}
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                    {payrollReportPayload.totalsRow && payrollReportPayload.rows.length > 0 && (
+                      <tfoot>
+                        <tr className="bg-slate-100 border-t-2 border-primary-custom font-extrabold text-slate-900">
+                          {payrollReportPayload.columns.map((col, cIdx) => (
+                            <td
+                              key={cIdx}
+                              className={`p-2.5 ${
+                                col.align === "right" ? "text-right" : col.align === "center" ? "text-center" : "text-left"
+                              }`}
+                            >
+                              {payrollReportPayload.totalsRow?.[cIdx] ?? ""}
+                            </td>
+                          ))}
+                        </tr>
+                      </tfoot>
+                    )}
+                  </table>
+                </div>
               </div>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* ========================================== */}
       {/* SUBMENU 10: PAYROLL HISTORY */}
       {/* ========================================== */}
       {activeSubTab === "history" && (
         <div className="space-y-4 animate-in fade-in duration-200">
-          <div className="bg-white p-4 border rounded-xl shadow-2xs">
-            <h3 className="text-xs font-extrabold text-slate-800 uppercase flex items-center gap-2">
-              <History className="h-4 w-4 text-primary-custom" /> Historical Payroll &amp; Audit Log
-            </h3>
-            <p className="text-[11px] text-slate-500 mt-0.5">Archive of all approved and closed monthly payroll periods.</p>
+          <div className="bg-white p-4 border rounded-xl shadow-2xs flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
+            <div>
+              <h3 className="text-xs font-extrabold text-slate-800 uppercase flex items-center gap-2">
+                <History className="h-4 w-4 text-primary-custom" /> Historical Payroll &amp; Audit Log
+              </h3>
+              <p className="text-[11px] text-slate-500 mt-0.5">Archive of all approved and closed monthly payroll periods.</p>
+            </div>
+            {canExport && (
+              <div className="flex flex-wrap items-center gap-2">
+                <ReportPrintButton
+                  printData={buildPayrollHistoryPayload}
+                  companyConfig={companyConfig || undefined}
+                  label="Print"
+                />
+                <ReportPDFExportButton
+                  reportData={buildPayrollHistoryPayload}
+                  companyConfig={companyConfig || undefined}
+                  label="Export PDF"
+                />
+              </div>
+            )}
           </div>
 
           <div className="bg-white border rounded-xl overflow-hidden shadow-2xs">
@@ -2445,7 +3006,7 @@ export default function PayrollManagement({
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {payrollPeriods.map(p => {
-                  const pRecords = payrollRecords.filter(r => r.payrollPeriodId === p.id);
+                  const pRecords = payrollRecords.filter(r => r.payrollPeriodId === p.id && isRecordInScope(r.employeeId, r.departmentId));
                   const net = pRecords.reduce((s, r) => s + r.netSalary, 0);
 
                   return (
@@ -2887,12 +3448,20 @@ export default function PayrollManagement({
 
             <div className="p-8 overflow-y-auto space-y-6 text-xs printable-canvas">
               {/* Branded Letterhead */}
-              <div className="border-b-2 border-primary-custom pb-4 flex justify-between items-center">
-                <div>
-                  <h2 className="font-extrabold text-sm text-slate-900 uppercase">ETHIOPIAN REINSURANCE SHARE COMPANY</h2>
-                  <p className="text-[10px] text-accent-custom font-extrabold uppercase">Confidential Salary Remuneration Statement</p>
+              <div className="border-b-2 border-primary-custom pb-4 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
+                <div className="flex items-center gap-3">
+                  <img
+                    src={getCompanyLogoUrl(companyConfig || undefined) || getDefaultEmblemDataUri()}
+                    alt="Ethiopian Reinsurance S.C. Official Logo"
+                    className="h-12 w-auto max-w-[120px] object-contain shrink-0"
+                    referrerPolicy="no-referrer"
+                  />
+                  <div>
+                    <h2 className="font-extrabold text-sm text-primary-custom uppercase">ETHIOPIAN REINSURANCE S.C.</h2>
+                    <p className="text-[10px] text-accent-custom font-extrabold uppercase">Confidential Salary Remuneration Statement</p>
+                  </div>
                 </div>
-                <div className="text-right text-[10px] text-slate-500 font-bold">
+                <div className="text-left sm:text-right text-[10px] text-slate-500 font-bold">
                   <p>Ref: <span className="font-mono text-primary-custom">{selectedPayslip.payslipRefNo}</span></p>
                   <p>Payment Date: {selectedPayslip.paymentDate}</p>
                 </div>
@@ -2962,16 +3531,22 @@ export default function PayrollManagement({
               </div>
             </div>
 
-            <div className="p-4 bg-slate-50 border-t flex justify-between items-center shrink-0">
+            <div className="p-4 bg-slate-50 border-t flex flex-wrap justify-between items-center gap-2 shrink-0">
               <span className="text-[10px] text-slate-400 font-bold">Generated: {selectedPayslip.generatedDate}</span>
               {canExport && (
-                <div className="flex gap-2">
-                  <button
-                    onClick={() => window.print()}
-                    className="px-4 py-2 bg-slate-800 hover:bg-slate-900 text-white font-bold text-xs rounded-lg flex items-center gap-1.5"
-                  >
-                    <Printer className="h-4 w-4" /> Print / PDF
-                  </button>
+                <div className="flex flex-wrap gap-2">
+                  <ReportPrintButton
+                    printData={() => buildPayslipReportPayload(selectedPayslip)}
+                    companyConfig={companyConfig || undefined}
+                    orientation="portrait"
+                    label="Print"
+                  />
+                  <ReportPDFExportButton
+                    reportData={() => buildPayslipReportPayload(selectedPayslip)}
+                    companyConfig={companyConfig || undefined}
+                    orientation="portrait"
+                    label="Export PDF"
+                  />
                 </div>
               )}
             </div>

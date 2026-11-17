@@ -1946,7 +1946,7 @@ export default function App() {
 
   // CORE APPLICATION WORKSPACE (Authenticated Operator view)
   return (
-    <div className="min-h-screen bg-slate-100 flex flex-col overflow-hidden">
+    <div className="min-h-screen bg-slate-100 flex flex-col overflow-hidden app-shell">
       {/* Inject custom variables dynamically */}
       <ThemeStyles branding={config.branding} />
 
@@ -1963,7 +1963,7 @@ export default function App() {
       />
 
       {/* Shared Sidebar + Main Workspace layout wrapper */}
-      <div className="flex flex-1 overflow-hidden h-[calc(100vh-64px)]">
+      <div className="flex flex-1 overflow-hidden h-[calc(100vh-64px)] app-body">
         
         {/* Dynamic Navigation Sidebar */}
         <Sidebar
@@ -1986,7 +1986,7 @@ export default function App() {
         />
 
         {/* Content canvas viewport */}
-        <main className="flex-1 overflow-y-auto p-6 md:p-8">
+        <main className="flex-1 overflow-y-auto p-6 md:p-8 app-main">
           {cloudHydrating && (
             <div className="mb-4 px-4 py-2.5 bg-sky-50 border border-sky-200 rounded-xl text-xs font-semibold text-sky-900 flex items-center gap-2">
               <div className="h-3.5 w-3.5 border-2 border-sky-600 border-t-transparent rounded-full animate-spin shrink-0"></div>
@@ -2075,6 +2075,7 @@ export default function App() {
                   employees={employees}
                   departments={departments}
                   familyMembers={familyMembers}
+                  companyConfig={config}
                   currentUser={currentUser}
                   initialSubTab={activeTab.startsWith("employees_") ? activeTab.replace("employees_", "") : "directory"}
                   permissions={currentRolePermissions?.modulePermissions.employees}
@@ -2091,6 +2092,7 @@ export default function App() {
                 <Departments
                   departments={departments}
                   employees={employees}
+                  companyConfig={config}
                   currentUser={currentUser}
                   permissions={currentRolePermissions?.modulePermissions.departments}
                   onAddDepartment={handleAddDepartment}
@@ -2105,6 +2107,7 @@ export default function App() {
                   attendance={attendance}
                   employees={employees}
                   departments={departments}
+                  companyConfig={config}
                   currentUser={currentUser}
                   permissions={currentRolePermissions?.modulePermissions.attendance}
                   onAddAttendance={handleAddAttendance}

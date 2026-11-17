@@ -1,15 +1,19 @@
 import React, { useState } from "react";
-import { AttendanceRecord, Employee, Department, User, ModulePermission } from "../types";
+import { AttendanceRecord, Employee, Department, User, ModulePermission, CompanyConfig } from "../types";
 import { getDepartmentHeadManagedDeptIds } from "../utils/rbacUtils";
+import { formatReportDateTime, ReportExportPayload } from "../utils/reportBranding";
+import ReportPrintButton from "./reports/ReportPrintButton";
+import ReportPDFExportButton from "./reports/ReportPDFExportButton";
 import { 
   Plus, Search, Edit, Clock, Calendar, Check, X, Save, 
-  FileSpreadsheet, Printer, Filter, BookOpen, Trash2 
+  FileSpreadsheet, Filter, BookOpen, Trash2 
 } from "lucide-react";
 
 interface AttendanceProps {
   attendance: AttendanceRecord[];
   employees: Employee[];
   departments: Department[];
+  companyConfig?: CompanyConfig;
   currentUser: User | null;
   permissions?: ModulePermission;
   onAddAttendance: (record: AttendanceRecord) => boolean;
@@ -22,6 +26,7 @@ export default function Attendance({
   attendance,
   employees,
   departments,
+  companyConfig,
   currentUser,
   permissions,
   onAddAttendance,
@@ -251,8 +256,68 @@ export default function Attendance({
   };
 
   // Printing & exporting
-  const handlePrint = () => {
-    window.print();
+  const buildAttendanceReportPayload = (): ReportExportPayload => {
+    const deptName = departments.find(d => d.id === filterDept)?.name || "All Departments";
+    const totalHours = filteredAttendance.reduce((sum, r) => sum + (Number(r.workingHours) || 0), 0);
+    const presentCount = filteredAttendance.filter(r => r.status === "Present" || r.status === "Late").length;
+    const lateCount = filteredAttendance.filter(r => r.status === "Late" || r.lateStatus === "Yes").length;
+    const absentCount = filteredAttendance.filter(r => r.status === "Absent").length;
+
+    return {
+      reportTitle: "Attendance Register Report",
+      filePrefix: "Attendance_Report",
+      reportSubtitle: `Status: ${filterStatus || "All Statuses"}${searchTerm ? ` | Search: "${searchTerm}"` : ""}`,
+      reportingPeriod: filterDate ? `Date: ${filterDate}` : "All Recorded Dates",
+      departmentOrUnit: deptName,
+      generatedAt: formatReportDateTime(),
+      generatedBy: currentUser?.fullName || currentUser?.email,
+      orientation: "landscape",
+      summaryMetrics: [
+        { label: "Total Records", value: `${filteredAttendance.length}` },
+        { label: "Present / Late", value: `${presentCount}` },
+        { label: "Late Incidents", value: `${lateCount}` },
+        { label: "Absent", value: `${absentCount}` }
+      ],
+      columns: [
+        { header: "Employee ID" },
+        { header: "Employee Name" },
+        { header: "Department" },
+        { header: "Date" },
+        { header: "Check-In", align: "center" },
+        { header: "Check-Out", align: "center" },
+        { header: "Working Hrs", align: "right" },
+        { header: "Late", align: "center" },
+        { header: "Status", align: "center" }
+      ],
+      rows: filteredAttendance.map(r => {
+        const emp = employees.find(e => e.employeeId === r.employeeId);
+        const empName = emp ? emp.fullName : r.employeeId;
+        const deptNameRow = emp ? (departments.find(d => d.id === emp.departmentId)?.name || emp.departmentId) : "N/A";
+        return [
+          r.employeeId,
+          empName,
+          deptNameRow,
+          r.date,
+          r.checkInTime || "--:--",
+          r.checkOutTime || "--:--",
+          `${r.workingHours} hrs`,
+          r.lateStatus,
+          r.status
+        ];
+      }),
+      totalsRow: [
+        "TOTAL",
+        `${filteredAttendance.length} Records`,
+        "",
+        "",
+        "",
+        "",
+        `${totalHours.toFixed(1)} hrs`,
+        "",
+        ""
+      ],
+      emptyMessage: "No attendance records logged for current filters."
+    };
   };
 
   const handleExportCSV = () => {
@@ -286,21 +351,23 @@ export default function Attendance({
         <div className="flex items-center gap-2 w-full sm:w-auto">
           {canExport && (
             <>
+              <ReportPrintButton
+                printData={buildAttendanceReportPayload}
+                companyConfig={companyConfig}
+                id="btn-print-attendance"
+              />
+              <ReportPDFExportButton
+                reportData={buildAttendanceReportPayload}
+                companyConfig={companyConfig}
+                id="btn-pdf-attendance"
+              />
               <button
                 onClick={handleExportCSV}
-                className="flex-1 sm:flex-initial flex items-center justify-center gap-1.5 px-3 py-1.5 border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold rounded-lg transition-all"
+                className="flex-1 sm:flex-initial flex items-center justify-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-lg shadow-2xs transition-all"
                 id="btn-export-attendance"
               >
-                <FileSpreadsheet className="h-4 w-4 text-emerald-600" />
-                <span>Export CSV</span>
-              </button>
-              <button
-                onClick={handlePrint}
-                className="flex-1 sm:flex-initial flex items-center justify-center gap-1.5 px-3 py-1.5 border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold rounded-lg transition-all"
-                id="btn-print-attendance"
-              >
-                <Printer className="h-4 w-4 text-slate-600" />
-                <span>Print List</span>
+                <FileSpreadsheet className="h-3.5 w-3.5" />
+                <span>Export Excel</span>
               </button>
             </>
           )}

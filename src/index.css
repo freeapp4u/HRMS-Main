@@ -1,1 +1,109 @@
 @import "tailwindcss";
+
+#etr-print-root {
+  display: none;
+}
+
+@media print {
+  * {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  html,
+  body {
+    height: auto !important;
+    min-height: 0 !important;
+    max-height: none !important;
+    overflow: visible !important;
+    background: #ffffff !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+
+  /* When triggered via ReportPrintButton, isolate strictly to #etr-print-root */
+  body.etr-printing > *:not(#etr-print-root) {
+    display: none !important;
+  }
+
+  body.etr-printing #etr-print-root {
+    display: block !important;
+    position: static !important;
+    width: 100% !important;
+    height: auto !important;
+    overflow: visible !important;
+    background: #ffffff !important;
+    color: #0f172a !important;
+  }
+
+  /* Fallback formatting for direct browser Ctrl+P */
+  body:not(.etr-printing) header,
+  body:not(.etr-printing) aside,
+  body:not(.etr-printing) nav,
+  body:not(.etr-printing) .no-print {
+    display: none !important;
+  }
+
+  body:not(.etr-printing) .app-shell,
+  body:not(.etr-printing) .app-body,
+  body:not(.etr-printing) .app-main,
+  body:not(.etr-printing) #root {
+    display: block !important;
+    height: auto !important;
+    max-height: none !important;
+    overflow: visible !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    background: #ffffff !important;
+  }
+
+  #etr-print-root .no-print,
+  .printable-canvas .no-print {
+    display: none !important;
+  }
+
+  #etr-print-root .overflow-x-auto,
+  #etr-print-root .overflow-y-auto,
+  .printable-canvas .overflow-x-auto,
+  .printable-canvas .overflow-y-auto {
+    overflow: visible !important;
+    max-height: none !important;
+  }
+
+  #etr-print-root .printable-canvas,
+  .printable-canvas {
+    border: none !important;
+    box-shadow: none !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    max-width: none !important;
+    width: 100% !important;
+    background: #ffffff !important;
+  }
+
+  table {
+    width: 100% !important;
+    border-collapse: collapse !important;
+    page-break-inside: auto;
+  }
+
+  thead {
+    display: table-header-group !important;
+  }
+
+  tfoot {
+    display: table-footer-group !important;
+  }
+
+  tr,
+  .avoid-break {
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
+  }
+
+  th,
+  td {
+    word-break: break-word;
+  }
+}
+

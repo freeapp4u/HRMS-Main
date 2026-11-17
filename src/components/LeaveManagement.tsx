@@ -5,9 +5,13 @@ import {
 } from "../types";
 import { calculateWorkingDaysCount, checkLeaveOverlap, calculateEmployeeLeaveBalance } from "../utils/leaveUtils";
 import { getDepartmentHeadManagedDeptIds } from "../utils/rbacUtils";
+import { formatReportDateTime, ReportExportPayload } from "../utils/reportBranding";
+import CompanyReportHeader from "./reports/CompanyReportHeader";
+import ReportPrintButton from "./reports/ReportPrintButton";
+import ReportPDFExportButton from "./reports/ReportPDFExportButton";
 import { 
   Plus, Search, Edit, Trash2, Calendar, CalendarDays, Check, X, Save, 
-  FileSpreadsheet, Printer, RefreshCw, Calculator, Ban, Info, AlertTriangle,
+  FileSpreadsheet, RefreshCw, Calculator, Ban, Info, AlertTriangle,
   LayoutDashboard, FileText, CheckCircle2, ShieldAlert, Clock, ArrowRight,
   Sliders, Settings, ChevronRight, Download, Filter, UserCheck, Layers, Award, ShieldCheck, Upload, ExternalLink
 } from "lucide-react";
@@ -844,6 +848,239 @@ export default function LeaveManagement({
     document.body.removeChild(link);
   };
 
+  const leaveReportTitleMap: Record<string, string> = {
+    yearend: "Year-End Leave Carry-Forward Report",
+    balance: "Employee Leave Balance Report",
+    employee: "Employee Leave Applications Report",
+    department: "Department Leave Utilization Report",
+    utilization: "Annual Leave Utilization Report",
+    expiration: "Leave Expiration & Carry-Forward Report",
+  };
+
+  const departmentLeaveSummary = useMemo(() => {
+    return departments.map(dept => {
+      const deptEmps = employees.filter(e => e.departmentId === dept.id);
+      const empSet = new Set(deptEmps.map(e => e.employeeId));
+      const deptLeaves = leaves.filter(l => empSet.has(l.employeeId));
+      const workingDays = deptLeaves.reduce((s, l) => l.status !== "Cancelled" ? s + l.daysCount : s, 0);
+      return {
+        code: dept.code,
+        name: dept.name,
+        staffCount: deptEmps.length,
+        totalRequests: deptLeaves.length,
+        activeCount: deptLeaves.filter(l => l.status === "Active").length,
+        completedCount: deptLeaves.filter(l => l.status === "Completed").length,
+        workingDays
+      };
+    });
+  }, [departments, employees, leaves]);
+
+  const buildLeaveReportPayload = (): ReportExportPayload => {
+    const deptLabel = departments.find(d => d.id === reportDeptFilter)?.name || "All Departments";
+    const periodLabel = `${leaveYearConfig.yearName} (${leaveYearConfig.startDate} to ${leaveYearConfig.endDate})`;
+    const generatedAt = formatReportDateTime();
+
+    if (reportType === "yearend" || reportType === "expiration") {
+      const rowsData = yearEndPreview.detailsList;
+      return {
+        reportTitle: leaveReportTitleMap[reportType],
+        filePrefix: "Leave_Report",
+        reportSubtitle: `Transition Preview (${yeFromYear} to ${yeToYear})`,
+        reportingPeriod: periodLabel,
+        departmentOrUnit: deptLabel,
+        generatedAt,
+        generatedBy: currentUser?.fullName || currentUser?.email,
+        orientation: "landscape",
+        summaryMetrics: [
+          { label: "Records Evaluated", value: `${rowsData.length}` },
+          { label: "Total Carried Forward", value: `${yearEndPreview.totalCarried} Days` },
+          { label: "Total Expired", value: `${yearEndPreview.totalExpired} Days` }
+        ],
+        columns: [
+          { header: "Employee ID" },
+          { header: "Employee Name" },
+          { header: "Department" },
+          { header: "Leave Type" },
+          { header: "Prev Opening", align: "center" },
+          { header: "Entitlement", align: "center" },
+          { header: "Utilized", align: "center" },
+          { header: "Unused", align: "center" },
+          { header: "Carry-Forward", align: "center" },
+          { header: "Expired", align: "center" },
+          { header: "New Opening", align: "center" }
+        ],
+        rows: rowsData.map(d => [
+          d.employeeId,
+          d.employeeName,
+          d.departmentName,
+          d.leaveType,
+          `${d.prevOpening} d`,
+          `${d.entitlement} d`,
+          `${d.utilized} d`,
+          `${d.unused} d`,
+          `${d.eligibleCarryForward} d`,
+          `${d.expired} d`,
+          `${d.newOpening} d`
+        ]),
+        totalsRow: [
+          "TOTAL",
+          `${rowsData.length} Entries`,
+          "",
+          "",
+          "",
+          "",
+          `${rowsData.reduce((s, r) => s + r.utilized, 0)} d`,
+          `${rowsData.reduce((s, r) => s + r.unused, 0)} d`,
+          `${yearEndPreview.totalCarried} d`,
+          `${yearEndPreview.totalExpired} d`,
+          ""
+        ]
+      };
+    }
+
+    if (reportType === "balance") {
+      return {
+        reportTitle: leaveReportTitleMap.balance,
+        filePrefix: "Leave_Report",
+        reportingPeriod: periodLabel,
+        departmentOrUnit: deptLabel,
+        generatedAt,
+        generatedBy: currentUser?.fullName || currentUser?.email,
+        orientation: "landscape",
+        summaryMetrics: [
+          { label: "Balance Records", value: `${computedBalances.length}` },
+          { label: "Total Utilized", value: `${computedBalances.reduce((s, b) => s + b.leaveUtilized, 0)} Days` },
+          { label: "Total Remaining", value: `${computedBalances.reduce((s, b) => s + b.remainingBalance, 0)} Days` }
+        ],
+        columns: [
+          { header: "Employee ID" },
+          { header: "Employee Name" },
+          { header: "Department" },
+          { header: "Leave Type" },
+          { header: "Opening", align: "center" },
+          { header: "Entitlement", align: "center" },
+          { header: "Carried Fwd", align: "center" },
+          { header: "Utilized", align: "center" },
+          { header: "Remaining", align: "center" }
+        ],
+        rows: computedBalances.map(b => {
+          const emp = employees.find(e => e.employeeId === b.employeeId);
+          const dept = emp ? departments.find(d => d.id === emp.departmentId) : null;
+          return [
+            b.employeeId,
+            emp?.fullName || b.employeeId,
+            dept?.name || "-",
+            b.leaveTypeName,
+            `${b.openingBalance} d`,
+            `${b.annualEntitlement} d`,
+            `${b.carriedForwardBalance} d`,
+            `${b.leaveUtilized} d`,
+            `${b.remainingBalance} d`
+          ];
+        }),
+        totalsRow: [
+          "TOTAL",
+          `${computedBalances.length} Records`,
+          "",
+          "",
+          "",
+          "",
+          `${computedBalances.reduce((s, b) => s + b.carriedForwardBalance, 0)} d`,
+          `${computedBalances.reduce((s, b) => s + b.leaveUtilized, 0)} d`,
+          `${computedBalances.reduce((s, b) => s + b.remainingBalance, 0)} d`
+        ]
+      };
+    }
+
+    if (reportType === "department") {
+      return {
+        reportTitle: leaveReportTitleMap.department,
+        filePrefix: "Leave_Report",
+        reportingPeriod: periodLabel,
+        departmentOrUnit: deptLabel,
+        generatedAt,
+        generatedBy: currentUser?.fullName || currentUser?.email,
+        orientation: "portrait",
+        columns: [
+          { header: "Dept Code" },
+          { header: "Department Name" },
+          { header: "Staff", align: "center" },
+          { header: "Leave Records", align: "center" },
+          { header: "Active", align: "center" },
+          { header: "Completed", align: "center" },
+          { header: "Working Days", align: "center" }
+        ],
+        rows: departmentLeaveSummary.map(d => [
+          d.code,
+          d.name,
+          d.staffCount,
+          d.totalRequests,
+          d.activeCount,
+          d.completedCount,
+          `${d.workingDays} d`
+        ]),
+        totalsRow: [
+          "TOTAL",
+          `${departmentLeaveSummary.length} Departments`,
+          departmentLeaveSummary.reduce((s, d) => s + d.staffCount, 0),
+          departmentLeaveSummary.reduce((s, d) => s + d.totalRequests, 0),
+          departmentLeaveSummary.reduce((s, d) => s + d.activeCount, 0),
+          departmentLeaveSummary.reduce((s, d) => s + d.completedCount, 0),
+          `${departmentLeaveSummary.reduce((s, d) => s + d.workingDays, 0)} d`
+        ]
+      };
+    }
+
+    // employee or utilization
+    const totalDays = leaves.reduce((s, l) => l.status !== "Cancelled" ? s + l.daysCount : s, 0);
+    return {
+      reportTitle: leaveReportTitleMap[reportType] || "Leave Management Report",
+      filePrefix: "Leave_Report",
+      reportingPeriod: periodLabel,
+      departmentOrUnit: deptLabel,
+      generatedAt,
+      generatedBy: currentUser?.fullName || currentUser?.email,
+      orientation: "landscape",
+      summaryMetrics: [
+        { label: "Leave Entries", value: `${leaves.length}` },
+        { label: "Working Days Utilized", value: `${totalDays} Days` }
+      ],
+      columns: [
+        { header: "Employee ID" },
+        { header: "Employee Name" },
+        { header: "Leave Type" },
+        { header: "Start Date" },
+        { header: "End Date" },
+        { header: "Working Days", align: "center" },
+        { header: "Status", align: "center" },
+        { header: "Reason" }
+      ],
+      rows: leaves.map(l => {
+        const empName = employees.find(e => e.employeeId === l.employeeId)?.fullName || l.employeeId;
+        return [
+          l.employeeId,
+          empName,
+          l.leaveType,
+          l.startDate,
+          l.endDate,
+          `${l.daysCount} d`,
+          l.status,
+          l.reason || "-"
+        ];
+      }),
+      totalsRow: [
+        "TOTAL",
+        `${leaves.length} Applications`,
+        "",
+        "",
+        "",
+        `${totalDays} d`,
+        "",
+        ""
+      ]
+    };
+  };
+
   // ==========================================
   // RENDER CONTENT BY SUBMENU TAB
   // ==========================================
@@ -1647,15 +1884,15 @@ export default function LeaveManagement({
       {/* ========================================== */}
       {activeSubTab === "reports" && (
         <div className="space-y-4 animate-in fade-in duration-200">
-          <div className="bg-white border rounded-xl p-4 shadow-2xs flex flex-col md:flex-row justify-between items-center gap-3">
+          <div className="bg-white border rounded-xl p-4 shadow-2xs flex flex-col lg:flex-row justify-between items-start lg:items-center gap-3 no-print">
             <div className="flex items-center gap-2">
               <span className="p-1.5 bg-sky-50 text-sky-600 rounded-lg">
                 <FileSpreadsheet className="h-4 w-4" />
               </span>
-              <h3 className="text-xs font-extrabold text-slate-800 uppercase tracking-wider">Leave Reports & Compliance</h3>
+              <h3 className="text-xs font-extrabold text-slate-800 uppercase tracking-wider">Leave Reports &amp; Compliance</h3>
             </div>
 
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2 w-full lg:w-auto justify-end">
               <select
                 value={reportType}
                 onChange={(e) => setReportType(e.target.value as any)}
@@ -1671,94 +1908,200 @@ export default function LeaveManagement({
 
               {canExport && (
                 <>
+                  <ReportPrintButton
+                    printData={buildLeaveReportPayload}
+                    companyConfig={companyConfig}
+                    id="btn-print-leave-report"
+                  />
+                  <ReportPDFExportButton
+                    reportData={buildLeaveReportPayload}
+                    companyConfig={companyConfig}
+                    id="btn-pdf-leave-report"
+                  />
                   <button
+                    type="button"
                     onClick={handleExportReportCSV}
-                    className="px-3 py-1.5 bg-emerald-600 text-white font-bold text-xs rounded-lg hover:bg-emerald-700 flex items-center gap-1"
+                    className="px-3 py-1.5 bg-emerald-600 text-white font-bold text-xs rounded-lg hover:bg-emerald-700 flex items-center gap-1.5 shadow-2xs"
                   >
                     <Download className="h-3.5 w-3.5" /> Export Excel
-                  </button>
-
-                  <button
-                    onClick={() => window.print()}
-                    className="px-3 py-1.5 bg-slate-700 text-white font-bold text-xs rounded-lg hover:bg-slate-800 flex items-center gap-1"
-                  >
-                    <Printer className="h-3.5 w-3.5" /> Print PDF
                   </button>
                 </>
               )}
             </div>
           </div>
 
-          {/* Report Data Table */}
-          <div className="bg-white border rounded-xl overflow-hidden shadow-2xs">
+          {/* Branded Report Preview Canvas */}
+          <div className="bg-white border rounded-xl p-6 sm:p-8 shadow-2xs printable-canvas">
+            <CompanyReportHeader
+              companyConfig={companyConfig}
+              reportTitle={leaveReportTitleMap[reportType] || "Leave Management Report"}
+              reportingPeriod={`${leaveYearConfig.yearName} (${leaveYearConfig.startDate} to ${leaveYearConfig.endDate})`}
+              departmentOrUnit={departments.find(d => d.id === reportDeptFilter)?.name || "All Departments"}
+              generatedBy={currentUser?.fullName || currentUser?.email}
+            />
+
             <div className="overflow-x-auto">
-              {reportType === "yearend" && (
-                <table className="w-full text-left text-xs border-collapse">
+              {(reportType === "yearend" || reportType === "expiration") && (
+                <table className="w-full text-left text-xs border-collapse border">
                   <thead>
                     <tr className="bg-slate-50 border-b text-[10px] font-bold text-slate-500 uppercase">
-                      <th className="p-3">Employee ID</th>
-                      <th className="p-3">Employee Name</th>
-                      <th className="p-3">Department</th>
-                      <th className="p-3">Leave Type</th>
-                      <th className="p-3 text-center">Prev Opening</th>
-                      <th className="p-3 text-center">Entitlement</th>
-                      <th className="p-3 text-center">Utilized</th>
-                      <th className="p-3 text-center">Unused Balance</th>
-                      <th className="p-3 text-center font-bold text-indigo-600">Eligible Carry-Forward</th>
-                      <th className="p-3 text-center text-rose-600">Expired Balance</th>
+                      <th className="p-3 border-r">Employee ID</th>
+                      <th className="p-3 border-r">Employee Name</th>
+                      <th className="p-3 border-r">Department</th>
+                      <th className="p-3 border-r">Leave Type</th>
+                      <th className="p-3 border-r text-center">Prev Opening</th>
+                      <th className="p-3 border-r text-center">Entitlement</th>
+                      <th className="p-3 border-r text-center">Utilized</th>
+                      <th className="p-3 border-r text-center">Unused Balance</th>
+                      <th className="p-3 border-r text-center font-bold text-indigo-600">Eligible Carry-Forward</th>
+                      <th className="p-3 border-r text-center text-rose-600">Expired Balance</th>
                       <th className="p-3 text-center bg-slate-100 font-extrabold">New Year Opening</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
                     {yearEndPreview.detailsList.map((d, i) => (
                       <tr key={i} className="hover:bg-slate-50">
-                        <td className="p-3 font-bold text-primary-custom">{d.employeeId}</td>
-                        <td className="p-3 font-semibold text-slate-800">{d.employeeName}</td>
-                        <td className="p-3 text-slate-500">{d.departmentName}</td>
-                        <td className="p-3 font-bold text-sky-600 text-[10px] uppercase">{d.leaveType}</td>
-                        <td className="p-3 text-center">{d.prevOpening} d</td>
-                        <td className="p-3 text-center">{d.entitlement} d</td>
-                        <td className="p-3 text-center text-rose-600 font-bold">{d.utilized} d</td>
-                        <td className="p-3 text-center font-bold text-slate-700">{d.unused} d</td>
-                        <td className="p-3 text-center font-extrabold text-indigo-600">{d.eligibleCarryForward} d</td>
-                        <td className="p-3 text-center font-bold text-slate-400">{d.expired} d</td>
+                        <td className="p-3 border-r font-bold text-primary-custom">{d.employeeId}</td>
+                        <td className="p-3 border-r font-semibold text-slate-800">{d.employeeName}</td>
+                        <td className="p-3 border-r text-slate-500">{d.departmentName}</td>
+                        <td className="p-3 border-r font-bold text-sky-600 text-[10px] uppercase">{d.leaveType}</td>
+                        <td className="p-3 border-r text-center">{d.prevOpening} d</td>
+                        <td className="p-3 border-r text-center">{d.entitlement} d</td>
+                        <td className="p-3 border-r text-center text-rose-600 font-bold">{d.utilized} d</td>
+                        <td className="p-3 border-r text-center font-bold text-slate-700">{d.unused} d</td>
+                        <td className="p-3 border-r text-center font-extrabold text-indigo-600">{d.eligibleCarryForward} d</td>
+                        <td className="p-3 border-r text-center font-bold text-slate-400">{d.expired} d</td>
                         <td className="p-3 text-center font-extrabold bg-slate-50 text-slate-900">{d.newOpening} d</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                  {yearEndPreview.detailsList.length > 0 && (
+                    <tfoot>
+                      <tr className="bg-slate-100 border-t-2 border-slate-300 font-extrabold text-slate-900">
+                        <td className="p-3 border-r" colSpan={6}>TOTAL ({yearEndPreview.detailsList.length} Records)</td>
+                        <td className="p-3 border-r text-center">{yearEndPreview.detailsList.reduce((s, r) => s + r.utilized, 0)} d</td>
+                        <td className="p-3 border-r text-center">{yearEndPreview.detailsList.reduce((s, r) => s + r.unused, 0)} d</td>
+                        <td className="p-3 border-r text-center text-indigo-700">{yearEndPreview.totalCarried} d</td>
+                        <td className="p-3 border-r text-center text-rose-700">{yearEndPreview.totalExpired} d</td>
+                        <td className="p-3 text-center"></td>
+                      </tr>
+                    </tfoot>
+                  )}
+                </table>
+              )}
+
+              {reportType === "balance" && (
+                <table className="w-full text-left text-xs border-collapse border">
+                  <thead>
+                    <tr className="bg-slate-50 border-b text-[10px] font-bold text-slate-500 uppercase">
+                      <th className="p-3 border-r">Employee ID</th>
+                      <th className="p-3 border-r">Employee Name</th>
+                      <th className="p-3 border-r">Department</th>
+                      <th className="p-3 border-r">Leave Type</th>
+                      <th className="p-3 border-r text-center">Opening</th>
+                      <th className="p-3 border-r text-center">Entitlement</th>
+                      <th className="p-3 border-r text-center">Carried Fwd</th>
+                      <th className="p-3 border-r text-center">Utilized</th>
+                      <th className="p-3 text-center font-extrabold">Remaining</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {computedBalances.map((b, idx) => {
+                      const emp = employees.find(e => e.employeeId === b.employeeId);
+                      const dept = emp ? departments.find(d => d.id === emp.departmentId) : null;
+                      return (
+                        <tr key={`${b.employeeId}-${b.leaveTypeName}-${idx}`} className="hover:bg-slate-50">
+                          <td className="p-3 border-r font-bold text-primary-custom">{b.employeeId}</td>
+                          <td className="p-3 border-r font-semibold text-slate-800">{emp?.fullName || b.employeeId}</td>
+                          <td className="p-3 border-r text-slate-500">{dept?.name || "-"}</td>
+                          <td className="p-3 border-r font-bold text-sky-600 text-[10px] uppercase">{b.leaveTypeName}</td>
+                          <td className="p-3 border-r text-center">{b.openingBalance} d</td>
+                          <td className="p-3 border-r text-center">{b.annualEntitlement} d</td>
+                          <td className="p-3 border-r text-center text-indigo-600 font-bold">{b.carriedForwardBalance} d</td>
+                          <td className="p-3 border-r text-center text-rose-600 font-bold">{b.leaveUtilized} d</td>
+                          <td className="p-3 text-center font-extrabold text-emerald-700">{b.remainingBalance} d</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )}
+
+              {reportType === "department" && (
+                <table className="w-full text-left text-xs border-collapse border">
+                  <thead>
+                    <tr className="bg-slate-50 border-b text-[10px] font-bold text-slate-500 uppercase">
+                      <th className="p-3 border-r">Dept Code</th>
+                      <th className="p-3 border-r">Department Name</th>
+                      <th className="p-3 border-r text-center">Staff</th>
+                      <th className="p-3 border-r text-center">Leave Records</th>
+                      <th className="p-3 border-r text-center">Active</th>
+                      <th className="p-3 border-r text-center">Completed</th>
+                      <th className="p-3 text-center font-extrabold">Working Days</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {departmentLeaveSummary.map(d => (
+                      <tr key={d.code} className="hover:bg-slate-50">
+                        <td className="p-3 border-r font-bold text-primary-custom">{d.code}</td>
+                        <td className="p-3 border-r font-semibold text-slate-800">{d.name}</td>
+                        <td className="p-3 border-r text-center">{d.staffCount}</td>
+                        <td className="p-3 border-r text-center font-bold">{d.totalRequests}</td>
+                        <td className="p-3 border-r text-center text-emerald-700 font-bold">{d.activeCount}</td>
+                        <td className="p-3 border-r text-center text-blue-700 font-bold">{d.completedCount}</td>
+                        <td className="p-3 text-center font-extrabold">{d.workingDays} d</td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
               )}
 
-              {reportType !== "yearend" && (
-                <table className="w-full text-left text-xs border-collapse">
+              {(reportType === "employee" || reportType === "utilization") && (
+                <table className="w-full text-left text-xs border-collapse border">
                   <thead>
                     <tr className="bg-slate-50 border-b text-[10px] font-bold text-slate-500 uppercase">
-                      <th className="p-3">Employee ID</th>
-                      <th className="p-3">Leave Type</th>
-                      <th className="p-3">Start Date</th>
-                      <th className="p-3">End Date</th>
-                      <th className="p-3 text-center">Working Days</th>
-                      <th className="p-3 text-center">Status</th>
+                      <th className="p-3 border-r">Employee ID</th>
+                      <th className="p-3 border-r">Employee Name</th>
+                      <th className="p-3 border-r">Leave Type</th>
+                      <th className="p-3 border-r">Start Date</th>
+                      <th className="p-3 border-r">End Date</th>
+                      <th className="p-3 border-r text-center">Working Days</th>
+                      <th className="p-3 border-r text-center">Status</th>
                       <th className="p-3">Reason</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
-                    {leaves.map(l => (
-                      <tr key={l.id} className="hover:bg-slate-50">
-                        <td className="p-3 font-bold text-primary-custom">{l.employeeId}</td>
-                        <td className="p-3 font-bold text-sky-600 text-[10px] uppercase">{l.leaveType}</td>
-                        <td className="p-3 text-slate-600">{l.startDate}</td>
-                        <td className="p-3 text-slate-600">{l.endDate}</td>
-                        <td className="p-3 text-center font-bold text-slate-800">{l.daysCount} d</td>
-                        <td className="p-3 text-center">
-                          <span className="px-2 py-0.5 bg-emerald-50 text-emerald-700 rounded-full font-bold text-[10px]">
-                            {l.status}
-                          </span>
-                        </td>
-                        <td className="p-3 text-slate-500">{l.reason || "-"}</td>
-                      </tr>
-                    ))}
+                    {leaves.map(l => {
+                      const empName = employees.find(e => e.employeeId === l.employeeId)?.fullName || l.employeeId;
+                      return (
+                        <tr key={l.id} className="hover:bg-slate-50">
+                          <td className="p-3 border-r font-bold text-primary-custom">{l.employeeId}</td>
+                          <td className="p-3 border-r font-semibold text-slate-800">{empName}</td>
+                          <td className="p-3 border-r font-bold text-sky-600 text-[10px] uppercase">{l.leaveType}</td>
+                          <td className="p-3 border-r text-slate-600">{l.startDate}</td>
+                          <td className="p-3 border-r text-slate-600">{l.endDate}</td>
+                          <td className="p-3 border-r text-center font-bold text-slate-800">{l.daysCount} d</td>
+                          <td className="p-3 border-r text-center">
+                            <span className="px-2 py-0.5 bg-emerald-50 text-emerald-700 rounded-full font-bold text-[10px]">
+                              {l.status}
+                            </span>
+                          </td>
+                          <td className="p-3 text-slate-500">{l.reason || "-"}</td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
+                  {leaves.length > 0 && (
+                    <tfoot>
+                      <tr className="bg-slate-100 border-t-2 border-slate-300 font-extrabold text-slate-900">
+                        <td className="p-3 border-r" colSpan={5}>TOTAL ({leaves.length} Applications)</td>
+                        <td className="p-3 border-r text-center">
+                          {leaves.reduce((s, l) => l.status !== "Cancelled" ? s + l.daysCount : s, 0)} d
+                        </td>
+                        <td className="p-3" colSpan={2}></td>
+                      </tr>
+                    </tfoot>
+                  )}
                 </table>
               )}
             </div>

@@ -1,0 +1,441 @@
+import jsPDF from "jspdf";
+import autoTable from "jspdf-autotable";
+import { CompanyConfig } from "../types";
+import {
+  buildReportFileName,
+  formatReportDateTime,
+  getCompanyLogoUrl,
+  loadReportLogoForPdf,
+  OFFICIAL_COMPANY_LEGAL_NAME,
+  OFFICIAL_COMPANY_NAME,
+  ReportColumn,
+  ReportExportPayload,
+  resolveReportOrientation,
+} from "./reportBranding";
+
+function hexToRgb(hex: string | undefined, fallback: [number, number, number]): [number, number, number] {
+  if (!hex) return fallback;
+  const clean = hex.replace("#", "").trim();
+  if (clean.length !== 6) return fallback;
+  const r = parseInt(clean.slice(0, 2), 16);
+  const g = parseInt(clean.slice(2, 4), 16);
+  const b = parseInt(clean.slice(4, 6), 16);
+  if ([r, g, b].some(Number.isNaN)) return fallback;
+  return [r, g, b];
+}
+
+function buildColumnStyles(columns: ReportColumn[]): Record<number, { halign?: "left" | "center" | "right" }> {
+  const styles: Record<number, { halign?: "left" | "center" | "right" }> = {};
+  columns.forEach((col, idx) => {
+    styles[idx] = { halign: col.align || "left" };
+  });
+  return styles;
+}
+
+export async function generateReportPdf(
+  payload: ReportExportPayload,
+  companyConfig?: CompanyConfig,
+  customFileName?: string
+): Promise<string> {
+  const primaryRgb = hexToRgb(companyConfig?.branding?.primaryColor, [0, 43, 91]);
+  const accentRgb = hexToRgb(companyConfig?.branding?.accentColor, [212, 175, 55]);
+
+  const orientation = payload.payslipData
+    ? "portrait"
+    : resolveReportOrientation(payload.orientation, payload.columns.length);
+
+  const doc = new jsPDF({
+    orientation,
+    unit: "mm",
+    format: "a4",
+    compress: true,
+  });
+
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const pageHeight = doc.internal.pageSize.getHeight();
+  const marginX = 12;
+  const contentWidth = pageWidth - marginX * 2;
+  const generatedAt = payload.generatedAt || formatReportDateTime();
+
+  // 1. Preload official company logo preserving proportions
+  const logoUrl = getCompanyLogoUrl(companyConfig);
+  const logoData = await loadReportLogoForPdf(logoUrl);
+
+  let cursorY = 11;
+
+  // 2. Corporate Letterhead (Top Left Logo + Company Identity + Contact Info)
+  const maxLogoH = 14;
+  const maxLogoW = 36;
+  const naturalRatio = (logoData.width || 1) / (logoData.height || 1);
+  let drawH = maxLogoH;
+  let drawW = drawH * naturalRatio;
+  if (drawW > maxLogoW) {
+    drawW = maxLogoW;
+    drawH = drawW / naturalRatio;
+  }
+
+  const logoY = cursorY + (maxLogoH - drawH) / 2;
+  doc.addImage(logoData.dataUrl, logoData.format, marginX, logoY, drawW, drawH, undefined, "FAST");
+
+  const textStartX = marginX + drawW + 4;
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(12);
+  doc.setTextColor(primaryRgb[0], primaryRgb[1], primaryRgb[2]);
+  doc.text(OFFICIAL_COMPANY_NAME, textStartX, cursorY + 5);
+
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(8);
+  doc.setTextColor(71, 85, 105);
+  const legalSub = companyConfig?.profile?.legalName || OFFICIAL_COMPANY_LEGAL_NAME;
+  doc.text(`${legalSub} • Human Resource Management System`, textStartX, cursorY + 9.5);
+
+  const addressLine = [
+    companyConfig?.profile?.address,
+    companyConfig?.profile?.city,
+    companyConfig?.profile?.country,
+  ]
+    .filter(Boolean)
+    .join(", ");
+  if (addressLine) {
+    doc.setFontSize(7.5);
+    doc.setTextColor(100, 116, 139);
+    doc.text(addressLine, textStartX, cursorY + 13.5);
+  }
+
+  // Right-aligned corporate contacts
+  const contactLines = [
+    companyConfig?.profile?.email ? `Email: ${companyConfig.profile.email}` : "",
+    companyConfig?.profile?.phoneNumber ? `Phone: ${companyConfig.profile.phoneNumber}` : "",
+    companyConfig?.profile?.website ? `Web: ${companyConfig.profile.website}` : "",
+  ].filter(Boolean);
+
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(7.5);
+  doc.setTextColor(100, 116, 139);
+  contactLines.forEach((line, idx) => {
+    doc.text(line, pageWidth - marginX, cursorY + 4 + idx * 4.2, { align: "right" });
+  });
+
+  cursorY += Math.max(maxLogoH, 15) + 2.5;
+
+  // Brand Divider (Navy + Gold)
+  doc.setDrawColor(primaryRgb[0], primaryRgb[1], primaryRgb[2]);
+  doc.setLineWidth(0.8);
+  doc.line(marginX, cursorY, pageWidth - marginX, cursorY);
+  doc.setDrawColor(accentRgb[0], accentRgb[1], accentRgb[2]);
+  doc.setLineWidth(0.5);
+  doc.line(marginX, cursorY + 1.1, pageWidth - marginX, cursorY + 1.1);
+
+  cursorY += 5;
+
+  // 3. Standard Report Header Metadata Block
+  const metaRows: { label: string; value: string }[] = [
+    { label: "Generated", value: generatedAt },
+  ];
+  if (payload.reportingPeriod) {
+    metaRows.push({ label: "Reporting Period", value: payload.reportingPeriod });
+  }
+  if (payload.departmentOrUnit) {
+    metaRows.push({ label: "Department / Unit", value: payload.departmentOrUnit });
+  }
+  if (payload.generatedBy) {
+    metaRows.push({ label: "Generated By", value: payload.generatedBy });
+  }
+  if (payload.referenceNo) {
+    metaRows.push({ label: "Reference", value: payload.referenceNo });
+  }
+  if (payload.extraMeta?.length) {
+    payload.extraMeta.forEach((m) => metaRows.push(m));
+  }
+
+  const titleMaxW = contentWidth * 0.56;
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(11.5);
+  doc.setTextColor(15, 23, 42);
+  const titleLines = doc.splitTextToSize(payload.reportTitle.toUpperCase(), titleMaxW);
+  doc.text(titleLines, marginX, cursorY + 1);
+
+  let titleBlockBottom = cursorY + 1 + titleLines.length * 4.5;
+  if (payload.reportSubtitle) {
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(8.2);
+    doc.setTextColor(71, 85, 105);
+    const subLines = doc.splitTextToSize(payload.reportSubtitle, titleMaxW);
+    doc.text(subLines, marginX, titleBlockBottom + 0.5);
+    titleBlockBottom += subLines.length * 3.8 + 1;
+  }
+
+  let metaBottom = cursorY;
+  doc.setFontSize(7.8);
+  metaRows.forEach((item, idx) => {
+    const y = cursorY + 0.5 + idx * 4.1;
+    doc.setFont("helvetica", "bold");
+    doc.setTextColor(71, 85, 105);
+    const labelStr = `${item.label}: `;
+    const valStr = item.value;
+    doc.setFont("helvetica", "normal");
+    const valWidth = doc.getTextWidth(valStr);
+    doc.setFont("helvetica", "bold");
+    const labelWidth = doc.getTextWidth(labelStr);
+    doc.text(labelStr, pageWidth - marginX - valWidth - labelWidth, y);
+    doc.setFont("helvetica", "normal");
+    doc.setTextColor(15, 23, 42);
+    doc.text(valStr, pageWidth - marginX, y, { align: "right" });
+    metaBottom = y + 2;
+  });
+
+  cursorY = Math.max(titleBlockBottom, metaBottom) + 3;
+
+  // 4. Structured Payslip PDF Mode
+  if (payload.payslipData) {
+    const ps = payload.payslipData;
+    const currency = ps.currency || "ETB";
+
+    // Employee & Period Information Card
+    doc.setFillColor(248, 250, 252);
+    doc.setDrawColor(226, 232, 240);
+    doc.roundedRect(marginX, cursorY, contentWidth, 22, 2, 2, "FD");
+
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(7.5);
+    doc.setTextColor(100, 116, 139);
+    doc.text("EMPLOYEE ID & NAME", marginX + 4, cursorY + 5);
+    doc.text("DEPARTMENT & PAYROLL PERIOD", marginX + contentWidth / 2 + 4, cursorY + 5);
+
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(9.5);
+    doc.setTextColor(15, 23, 42);
+    doc.text(`${ps.employeeName} (${ps.employeeId})`, marginX + 4, cursorY + 11);
+    doc.text(ps.department, marginX + contentWidth / 2 + 4, cursorY + 11);
+
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(8);
+    doc.setTextColor(71, 85, 105);
+    doc.text(ps.position || "-", marginX + 4, cursorY + 16.5);
+    doc.setFont("helvetica", "bold");
+    doc.setTextColor(primaryRgb[0], primaryRgb[1], primaryRgb[2]);
+    doc.text(`${ps.periodName} • Payment Date: ${ps.paymentDate}`, marginX + contentWidth / 2 + 4, cursorY + 16.5);
+
+    cursorY += 28;
+
+    // Earnings Table
+    autoTable(doc, {
+      startY: cursorY,
+      margin: { left: marginX, right: marginX },
+      head: [["Earnings Breakdown", `Amount (${currency})`]],
+      body: ps.earnings.map((e) => [e.name, `${e.amount.toLocaleString()} ${currency}`]),
+      foot: [["Total Gross Salary", `${ps.grossSalary.toLocaleString()} ${currency}`]],
+      theme: "grid",
+      headStyles: { fillColor: [6, 95, 70], textColor: 255, fontSize: 8.5, fontStyle: "bold" },
+      footStyles: { fillColor: [236, 253, 245], textColor: [6, 78, 59], fontSize: 8.5, fontStyle: "bold" },
+      styles: { fontSize: 8.5, cellPadding: 2.8 },
+      columnStyles: { 1: { halign: "right" } },
+      rowPageBreak: "avoid",
+    });
+
+    cursorY = ((doc as unknown as { lastAutoTable?: { finalY: number } }).lastAutoTable?.finalY || cursorY) + 6;
+
+    // Deductions Table
+    autoTable(doc, {
+      startY: cursorY,
+      margin: { left: marginX, right: marginX },
+      head: [["Deductions Breakdown", `Amount (${currency})`]],
+      body: ps.deductions.map((d) => [d.name, `${d.amount.toLocaleString()} ${currency}`]),
+      foot: [["Total Deductions", `${ps.totalDeductions.toLocaleString()} ${currency}`]],
+      theme: "grid",
+      headStyles: { fillColor: [159, 18, 57], textColor: 255, fontSize: 8.5, fontStyle: "bold" },
+      footStyles: { fillColor: [255, 241, 242], textColor: [136, 19, 55], fontSize: 8.5, fontStyle: "bold" },
+      styles: { fontSize: 8.5, cellPadding: 2.8 },
+      columnStyles: { 1: { halign: "right" } },
+      rowPageBreak: "avoid",
+    });
+
+    cursorY = ((doc as unknown as { lastAutoTable?: { finalY: number } }).lastAutoTable?.finalY || cursorY) + 8;
+
+    // Net Salary Highlight Banner
+    doc.setFillColor(primaryRgb[0], primaryRgb[1], primaryRgb[2]);
+    doc.roundedRect(marginX, cursorY, contentWidth, 20, 2, 2, "F");
+
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(8);
+    doc.setTextColor(accentRgb[0], accentRgb[1], accentRgb[2]);
+    doc.text("NET REMUNERATION PAID", marginX + 5, cursorY + 6.5);
+
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(14);
+    doc.setTextColor(255, 255, 255);
+    doc.text(`${ps.netSalary.toLocaleString()} ${currency}`, marginX + 5, cursorY + 14.5);
+
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(8);
+    doc.setTextColor(226, 232, 240);
+    doc.text(
+      `Employer Pension (11%): ${ps.employerPension.toLocaleString()} ${currency}`,
+      pageWidth - marginX - 5,
+      cursorY + 9,
+      { align: "right" }
+    );
+    doc.setFontSize(7);
+    doc.text(
+      "Confidential Salary Statement • Calculated per Ethiopian statutory rules",
+      pageWidth - marginX - 5,
+      cursorY + 14.5,
+      { align: "right" }
+    );
+  } else {
+    // 5. Summary Metrics Strip (if provided)
+    if (payload.summaryMetrics && payload.summaryMetrics.length > 0) {
+      const count = payload.summaryMetrics.length;
+      const gap = 3;
+      const cardW = (contentWidth - gap * (count - 1)) / count;
+      const cardH = 13.5;
+
+      payload.summaryMetrics.forEach((metric, idx) => {
+        const x = marginX + idx * (cardW + gap);
+        doc.setFillColor(248, 250, 252);
+        doc.setDrawColor(226, 232, 240);
+        doc.roundedRect(x, cursorY, cardW, cardH, 1.5, 1.5, "FD");
+
+        doc.setFont("helvetica", "bold");
+        doc.setFontSize(6.8);
+        doc.setTextColor(100, 116, 139);
+        doc.text(metric.label.toUpperCase(), x + 3, cursorY + 4.8);
+
+        doc.setFont("helvetica", "bold");
+        doc.setFontSize(9.2);
+        doc.setTextColor(15, 23, 42);
+        const valText = doc.splitTextToSize(String(metric.value), cardW - 6);
+        doc.text(valText[0] || "", x + 3, cursorY + 10.2);
+      });
+
+      cursorY += cardH + 5;
+    }
+
+    // 6. Primary Report Table
+    const bodyRows =
+      payload.rows.length > 0
+        ? payload.rows.map((r) => r.map((cell) => (cell === null || cell === undefined ? "" : String(cell))))
+        : [[payload.emptyMessage || "No records match the currently selected filters."]];
+
+    autoTable(doc, {
+      startY: cursorY,
+      margin: { left: marginX, right: marginX, top: 14, bottom: 16 },
+      head: [payload.columns.map((c) => c.header)],
+      body:
+        payload.rows.length > 0
+          ? bodyRows
+          : [[{ content: payload.emptyMessage || "No records match the currently selected filters.", colSpan: payload.columns.length, styles: { halign: "center", textColor: [148, 163, 184], fontStyle: "italic" } }]],
+      foot:
+        payload.totalsRow && payload.rows.length > 0
+          ? [payload.totalsRow.map((cell) => (cell === null || cell === undefined ? "" : String(cell)))]
+          : undefined,
+      showHead: "everyPage",
+      showFoot: "lastPage",
+      theme: "grid",
+      rowPageBreak: "avoid",
+      styles: {
+        font: "helvetica",
+        fontSize: orientation === "landscape" ? 7.8 : 8.2,
+        cellPadding: 2.3,
+        textColor: [30, 41, 59],
+        lineColor: [226, 232, 240],
+        lineWidth: 0.2,
+        overflow: "linebreak",
+      },
+      headStyles: {
+        fillColor: primaryRgb,
+        textColor: [255, 255, 255],
+        fontStyle: "bold",
+        fontSize: orientation === "landscape" ? 7.5 : 7.8,
+      },
+      footStyles: {
+        fillColor: [241, 245, 249],
+        textColor: [15, 23, 42],
+        fontStyle: "bold",
+        fontSize: orientation === "landscape" ? 7.8 : 8.2,
+      },
+      alternateRowStyles: {
+        fillColor: [248, 250, 252],
+      },
+      columnStyles: buildColumnStyles(payload.columns),
+    });
+
+    // 7. Additional Breakdown Tables (e.g. Employee Statistics)
+    if (payload.additionalTables && payload.additionalTables.length > 0) {
+      for (const extraTable of payload.additionalTables) {
+        let nextY = ((doc as unknown as { lastAutoTable?: { finalY: number } }).lastAutoTable?.finalY || cursorY) + 7;
+        if (nextY > pageHeight - 32) {
+          doc.addPage();
+          nextY = 16;
+        }
+
+        doc.setFont("helvetica", "bold");
+        doc.setFontSize(9.5);
+        doc.setTextColor(primaryRgb[0], primaryRgb[1], primaryRgb[2]);
+        doc.text(extraTable.title.toUpperCase(), marginX, nextY);
+
+        autoTable(doc, {
+          startY: nextY + 2.5,
+          margin: { left: marginX, right: marginX, top: 14, bottom: 16 },
+          head: [extraTable.columns.map((c) => c.header)],
+          body:
+            extraTable.rows.length > 0
+              ? extraTable.rows.map((r) => r.map((c) => String(c ?? "")))
+              : [[{ content: "No data available.", colSpan: extraTable.columns.length, styles: { halign: "center", textColor: [148, 163, 184] } }]],
+          foot:
+            extraTable.totalsRow && extraTable.rows.length > 0
+              ? [extraTable.totalsRow.map((c) => String(c ?? ""))]
+              : undefined,
+          showHead: "everyPage",
+          showFoot: "lastPage",
+          theme: "grid",
+          rowPageBreak: "avoid",
+          styles: {
+            font: "helvetica",
+            fontSize: 8,
+            cellPadding: 2.3,
+            textColor: [30, 41, 59],
+            lineColor: [226, 232, 240],
+            lineWidth: 0.2,
+          },
+          headStyles: {
+            fillColor: primaryRgb,
+            textColor: [255, 255, 255],
+            fontStyle: "bold",
+            fontSize: 7.8,
+          },
+          footStyles: {
+            fillColor: [241, 245, 249],
+            textColor: [15, 23, 42],
+            fontStyle: "bold",
+          },
+          alternateRowStyles: {
+            fillColor: [248, 250, 252],
+          },
+          columnStyles: buildColumnStyles(extraTable.columns),
+        });
+      }
+    }
+  }
+
+  // 8. Page Numbers & Corporate Footer on Every Page
+  const totalPages = doc.getNumberOfPages();
+  for (let pageIdx = 1; pageIdx <= totalPages; pageIdx++) {
+    doc.setPage(pageIdx);
+    doc.setDrawColor(226, 232, 240);
+    doc.setLineWidth(0.3);
+    doc.line(marginX, pageHeight - 11.5, pageWidth - marginX, pageHeight - 11.5);
+
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(7.5);
+    doc.setTextColor(100, 116, 139);
+    doc.text(`${OFFICIAL_COMPANY_NAME} • Official ETRHRMS Report`, marginX, pageHeight - 7);
+    doc.text(`Generated: ${generatedAt}`, pageWidth / 2, pageHeight - 7, { align: "center" });
+    doc.setFont("helvetica", "bold");
+    doc.text(`Page ${pageIdx} of ${totalPages}`, pageWidth - marginX, pageHeight - 7, { align: "right" });
+  }
+
+  const finalFileName = customFileName || buildReportFileName(payload.filePrefix, "pdf");
+  doc.save(finalFileName);
+  return finalFileName;
+}

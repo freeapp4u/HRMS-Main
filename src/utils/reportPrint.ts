@@ -1,0 +1,354 @@
+import { CompanyConfig } from "../types";
+import {
+  formatReportDateTime,
+  getCompanyLogoUrl,
+  getDefaultEmblemDataUri,
+  OFFICIAL_COMPANY_LEGAL_NAME,
+  OFFICIAL_COMPANY_NAME,
+  preloadDomImages,
+  ReportExportPayload,
+  resolveReportOrientation,
+} from "./reportBranding";
+
+function escapeHtml(value: unknown): string {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function createDynamicPageStyle(orientation: "portrait" | "landscape"): HTMLStyleElement {
+  const styleEl = document.createElement("style");
+  styleEl.id = "etr-dynamic-page-style";
+  styleEl.textContent = `
+    @page {
+      size: A4 ${orientation};
+      margin: ${orientation === "landscape" ? "10mm 10mm 13mm 10mm" : "12mm 11mm 14mm 11mm"};
+      @bottom-left {
+        content: "${OFFICIAL_COMPANY_NAME} • Official ETRHRMS Report";
+        font-size: 8pt;
+        color: #64748b;
+      }
+      @bottom-right {
+        content: "Page " counter(page) " of " counter(pages);
+        font-size: 8pt;
+        font-weight: 600;
+        color: #475569;
+      }
+    }
+  `;
+  return styleEl;
+}
+
+function ensurePrintRoot(): HTMLElement {
+  const existing = document.getElementById("etr-print-root");
+  if (existing) existing.remove();
+  const root = document.createElement("div");
+  root.id = "etr-print-root";
+  document.body.appendChild(root);
+  return root;
+}
+
+function runNativePrintWithCleanup(printRoot: HTMLElement, pageStyle: HTMLStyleElement, documentTitle?: string) {
+  const prevTitle = document.title;
+  if (documentTitle) {
+    document.title = documentTitle;
+  }
+
+  document.head.appendChild(pageStyle);
+  document.body.classList.add("etr-printing");
+
+  let cleaned = false;
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    document.body.classList.remove("etr-printing");
+    pageStyle.remove();
+    printRoot.remove();
+    document.title = prevTitle;
+    window.removeEventListener("afterprint", cleanup);
+  };
+
+  window.addEventListener("afterprint", cleanup);
+
+  // Trigger native browser print dialog on next animation frame after layout settles
+  requestAnimationFrame(() => {
+    setTimeout(() => {
+      try {
+        window.print();
+      } finally {
+        // Fallback cleanup for browsers that don't reliably fire afterprint or cancel early
+        setTimeout(cleanup, 1500);
+      }
+    }, 60);
+  });
+}
+
+export async function printTargetElement(
+  element: HTMLElement,
+  options?: {
+    orientation?: "portrait" | "landscape" | "auto";
+    columnCount?: number;
+    documentTitle?: string;
+  }
+): Promise<void> {
+  const detectedCols =
+    options?.columnCount ??
+    element.querySelectorAll("table thead tr:first-child th").length;
+  const orientation = resolveReportOrientation(options?.orientation, detectedCols);
+
+  const printRoot = ensurePrintRoot();
+  const cloned = element.cloneNode(true) as HTMLElement;
+  cloned.querySelectorAll(".no-print").forEach((el) => el.remove());
+  cloned.style.maxHeight = "none";
+  cloned.style.overflow = "visible";
+  cloned.classList.remove("max-h-[90vh]", "overflow-y-auto", "shadow-2xs", "shadow-xl", "shadow-2xl");
+
+  printRoot.appendChild(cloned);
+  await preloadDomImages(printRoot);
+
+  const pageStyle = createDynamicPageStyle(orientation);
+  runNativePrintWithCleanup(printRoot, pageStyle, options?.documentTitle);
+}
+
+export async function printStructuredReport(
+  payload: ReportExportPayload,
+  companyConfig?: CompanyConfig
+): Promise<void> {
+  const primaryColor = companyConfig?.branding?.primaryColor || "#002B5B";
+  const accentColor = companyConfig?.branding?.accentColor || "#D4AF37";
+  const logoUrl = getCompanyLogoUrl(companyConfig);
+  const effectiveLogoSrc = logoUrl || getDefaultEmblemDataUri();
+  const generatedAt = payload.generatedAt || formatReportDateTime();
+
+  const orientation = payload.payslipData
+    ? "portrait"
+    : resolveReportOrientation(payload.orientation, payload.columns.length);
+
+  const contactParts = [
+    companyConfig?.profile?.email ? `Email: ${escapeHtml(companyConfig.profile.email)}` : "",
+    companyConfig?.profile?.phoneNumber ? `Phone: ${escapeHtml(companyConfig.profile.phoneNumber)}` : "",
+    companyConfig?.profile?.website ? `Web: ${escapeHtml(companyConfig.profile.website)}` : "",
+  ].filter(Boolean);
+
+  const addressLine = [
+    companyConfig?.profile?.address,
+    companyConfig?.profile?.city,
+    companyConfig?.profile?.country,
+  ]
+    .filter(Boolean)
+    .map(escapeHtml)
+    .join(", ");
+
+  const metaItems = [
+    { label: "Generated", value: generatedAt },
+    ...(payload.reportingPeriod ? [{ label: "Reporting Period", value: payload.reportingPeriod }] : []),
+    ...(payload.departmentOrUnit ? [{ label: "Department / Unit", value: payload.departmentOrUnit }] : []),
+    ...(payload.generatedBy ? [{ label: "Generated By", value: payload.generatedBy }] : []),
+    ...(payload.referenceNo ? [{ label: "Reference", value: payload.referenceNo }] : []),
+    ...(payload.extraMeta || []),
+  ];
+
+  const headerHtml = `
+    <div style="font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: #0f172a; font-size: 11px;">
+      <div style="display: flex; justify-content: space-between; align-items: center; gap: 16px; padding-bottom: 10px; border-bottom: 3px solid ${escapeHtml(primaryColor)}; position: relative;">
+        <div style="display: flex; align-items: center; gap: 12px;">
+          <img src="${escapeHtml(effectiveLogoSrc)}" alt="Ethiopian Reinsurance S.C. Logo" style="height: 52px; width: auto; max-width: 150px; object-fit: contain;" referrerpolicy="no-referrer" />
+          <div>
+            <div style="font-size: 15px; font-weight: 800; color: ${escapeHtml(primaryColor)}; letter-spacing: -0.01em;">${OFFICIAL_COMPANY_NAME}</div>
+            <div style="font-size: 10px; font-weight: 600; color: #475569; margin-top: 2px;">${escapeHtml(companyConfig?.profile?.legalName || OFFICIAL_COMPANY_LEGAL_NAME)} • Human Resource Management</div>
+            ${addressLine ? `<div style="font-size: 9px; color: #64748b; margin-top: 2px;">${addressLine}</div>` : ""}
+          </div>
+        </div>
+        <div style="text-align: right; font-size: 9.5px; color: #475569; line-height: 1.45;">
+          ${contactParts.map((p) => `<div>${p}</div>`).join("")}
+        </div>
+      </div>
+      <div style="height: 2px; background-color: ${escapeHtml(accentColor)}; margin-bottom: 12px;"></div>
+
+      <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 14px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 10px 12px;">
+        <div>
+          <div style="font-size: 13px; font-weight: 800; color: #0f172a; text-transform: uppercase;">${escapeHtml(payload.reportTitle)}</div>
+          ${payload.reportSubtitle ? `<div style="font-size: 10px; color: #475569; margin-top: 2px;">${escapeHtml(payload.reportSubtitle)}</div>` : ""}
+        </div>
+        <div style="text-align: right; font-size: 9.5px; line-height: 1.5; color: #334155;">
+          ${metaItems.map((m) => `<div><strong style="color:#475569;">${escapeHtml(m.label)}:</strong> ${escapeHtml(m.value)}</div>`).join("")}
+        </div>
+      </div>
+  `;
+
+  let bodyHtml = "";
+
+  if (payload.payslipData) {
+    const ps = payload.payslipData;
+    const currency = escapeHtml(ps.currency || "ETB");
+    bodyHtml = `
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 12px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; margin-bottom: 16px;">
+        <div>
+          <div style="font-size: 9px; font-weight: 700; color: #64748b; text-transform: uppercase;">Employee ID &amp; Name</div>
+          <div style="font-size: 12px; font-weight: 800; color: #0f172a; margin-top: 2px;">${escapeHtml(ps.employeeName)} (${escapeHtml(ps.employeeId)})</div>
+          <div style="font-size: 10px; color: #475569;">${escapeHtml(ps.position)}</div>
+        </div>
+        <div>
+          <div style="font-size: 9px; font-weight: 700; color: #64748b; text-transform: uppercase;">Department &amp; Payroll Period</div>
+          <div style="font-size: 12px; font-weight: 800; color: #0f172a; margin-top: 2px;">${escapeHtml(ps.department)}</div>
+          <div style="font-size: 10px; font-weight: 700; color: ${escapeHtml(primaryColor)};">${escapeHtml(ps.periodName)} • Paid: ${escapeHtml(ps.paymentDate)}</div>
+        </div>
+      </div>
+
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px;">
+        <div>
+          <table style="width: 100%; border-collapse: collapse; font-size: 10.5px;">
+            <thead>
+              <tr style="background: #065f46; color: #ffffff;">
+                <th style="padding: 6px 8px; text-align: left; border: 1px solid #cbd5e1;">Earnings Breakdown</th>
+                <th style="padding: 6px 8px; text-align: right; border: 1px solid #cbd5e1;">Amount (${currency})</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${ps.earnings
+                .map(
+                  (e) => `
+                  <tr>
+                    <td style="padding: 6px 8px; border: 1px solid #e2e8f0;">${escapeHtml(e.name)}</td>
+                    <td style="padding: 6px 8px; border: 1px solid #e2e8f0; text-align: right; font-weight: 700;">${escapeHtml(e.amount.toLocaleString())} ${currency}</td>
+                  </tr>`
+                )
+                .join("")}
+            </tbody>
+            <tfoot>
+              <tr style="background: #ecfdf5; font-weight: 800;">
+                <td style="padding: 7px 8px; border: 1px solid #cbd5e1;">Total Gross Salary</td>
+                <td style="padding: 7px 8px; border: 1px solid #cbd5e1; text-align: right;">${escapeHtml(ps.grossSalary.toLocaleString())} ${currency}</td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+
+        <div>
+          <table style="width: 100%; border-collapse: collapse; font-size: 10.5px;">
+            <thead>
+              <tr style="background: #9f1239; color: #ffffff;">
+                <th style="padding: 6px 8px; text-align: left; border: 1px solid #cbd5e1;">Deductions Breakdown</th>
+                <th style="padding: 6px 8px; text-align: right; border: 1px solid #cbd5e1;">Amount (${currency})</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${ps.deductions
+                .map(
+                  (d) => `
+                  <tr>
+                    <td style="padding: 6px 8px; border: 1px solid #e2e8f0;">${escapeHtml(d.name)}</td>
+                    <td style="padding: 6px 8px; border: 1px solid #e2e8f0; text-align: right; font-weight: 700; color: #be123c;">${escapeHtml(d.amount.toLocaleString())} ${currency}</td>
+                  </tr>`
+                )
+                .join("")}
+            </tbody>
+            <tfoot>
+              <tr style="background: #fff1f2; font-weight: 800;">
+                <td style="padding: 7px 8px; border: 1px solid #cbd5e1;">Total Deductions</td>
+                <td style="padding: 7px 8px; border: 1px solid #cbd5e1; text-align: right;">${escapeHtml(ps.totalDeductions.toLocaleString())} ${currency}</td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      </div>
+
+      <div style="background: ${escapeHtml(primaryColor)}; color: #ffffff; border-radius: 6px; padding: 14px 16px; display: flex; justify-content: space-between; align-items: center;">
+        <div>
+          <div style="font-size: 9px; font-weight: 800; color: ${escapeHtml(accentColor)}; text-transform: uppercase;">Net Remuneration Paid</div>
+          <div style="font-size: 18px; font-weight: 900; margin-top: 2px;">${escapeHtml(ps.netSalary.toLocaleString())} ${currency}</div>
+        </div>
+        <div style="text-align: right; font-size: 9.5px; color: #e2e8f0;">
+          <div>Employer Pension (11%): <strong>${escapeHtml(ps.employerPension.toLocaleString())} ${currency}</strong></div>
+          <div style="font-style: italic; opacity: 0.85; margin-top: 2px;">Calculated per Ethiopian statutory rules</div>
+        </div>
+      </div>
+    `;
+  } else {
+    const metricsHtml =
+      payload.summaryMetrics && payload.summaryMetrics.length > 0
+        ? `<div style="display: grid; grid-template-columns: repeat(${Math.min(payload.summaryMetrics.length, 4)}, 1fr); gap: 8px; margin-bottom: 14px;">
+            ${payload.summaryMetrics
+              .map(
+                (m) => `
+              <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 5px; padding: 7px 10px;" class="avoid-break">
+                <div style="font-size: 8.5px; font-weight: 700; color: #64748b; text-transform: uppercase;">${escapeHtml(m.label)}</div>
+                <div style="font-size: 12.5px; font-weight: 800; color: #0f172a; margin-top: 2px;">${escapeHtml(m.value)}</div>
+              </div>`
+              )
+              .join("")}
+          </div>`
+        : "";
+
+    const renderTable = (
+      cols: ReportExportPayload["columns"],
+      rows: ReportExportPayload["rows"],
+      totalsRow?: ReportExportPayload["totalsRow"],
+      emptyMsg?: string,
+      sectionTitle?: string
+    ) => `
+      ${sectionTitle ? `<div style="font-size: 11px; font-weight: 800; color: ${escapeHtml(primaryColor)}; text-transform: uppercase; margin: 16px 0 6px 0;">${escapeHtml(sectionTitle)}</div>` : ""}
+      <table style="width: 100%; border-collapse: collapse; font-size: ${orientation === "landscape" ? "9.5px" : "10px"};">
+        <thead>
+          <tr style="background: ${escapeHtml(primaryColor)}; color: #ffffff;">
+            ${cols
+              .map(
+                (c) =>
+                  `<th style="padding: 6px 7px; border: 1px solid #cbd5e1; text-align: ${c.align || "left"}; font-weight: 700; text-transform: uppercase; font-size: 8.5px;">${escapeHtml(c.header)}</th>`
+              )
+              .join("")}
+          </tr>
+        </thead>
+        <tbody>
+          ${
+            rows.length === 0
+              ? `<tr><td colspan="${cols.length}" style="padding: 16px; text-align: center; color: #94a3b8; border: 1px solid #e2e8f0;">${escapeHtml(emptyMsg || "No records match current filters.")}</td></tr>`
+              : rows
+                  .map(
+                    (row, rIdx) => `
+                  <tr style="background: ${rIdx % 2 === 1 ? "#f8fafc" : "#ffffff"};">
+                    ${cols
+                      .map(
+                        (c, cIdx) =>
+                          `<td style="padding: 5.5px 7px; border: 1px solid #e2e8f0; text-align: ${c.align || "left"}; color: #1e293b;">${escapeHtml(row[cIdx] ?? "")}</td>`
+                      )
+                      .join("")}
+                  </tr>`
+                  )
+                  .join("")
+          }
+        </tbody>
+        ${
+          totalsRow && rows.length > 0
+            ? `<tfoot>
+                <tr style="background: #f1f5f9; font-weight: 800; color: #0f172a;">
+                  ${cols
+                    .map(
+                      (c, cIdx) =>
+                        `<td style="padding: 6px 7px; border: 1px solid #cbd5e1; text-align: ${c.align || "left"};">${escapeHtml(totalsRow[cIdx] ?? "")}</td>`
+                    )
+                    .join("")}
+                </tr>
+              </tfoot>`
+            : ""
+        }
+      </table>
+    `;
+
+    const extraTablesHtml = (payload.additionalTables || [])
+      .map((t) => renderTable(t.columns, t.rows, t.totalsRow, "No data available.", t.title))
+      .join("");
+
+    bodyHtml = `${metricsHtml}${renderTable(payload.columns, payload.rows, payload.totalsRow, payload.emptyMessage)}${extraTablesHtml}`;
+  }
+
+  const printRoot = ensurePrintRoot();
+  printRoot.innerHTML = `${headerHtml}${bodyHtml}</div>`;
+  await preloadDomImages(printRoot);
+
+  const pageStyle = createDynamicPageStyle(orientation);
+  runNativePrintWithCleanup(printRoot, pageStyle, payload.reportTitle);
+}

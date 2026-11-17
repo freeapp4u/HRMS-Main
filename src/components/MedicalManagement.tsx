@@ -4,9 +4,13 @@ import {
   FamilyMember, MedicalExpense, MedicalPolicyConfig, RelationshipType 
 } from "../types";
 import { getDepartmentHeadManagedDeptIds } from "../utils/rbacUtils";
+import { formatReportDateTime, ReportExportPayload } from "../utils/reportBranding";
+import CompanyReportHeader from "./reports/CompanyReportHeader";
+import ReportPrintButton from "./reports/ReportPrintButton";
+import ReportPDFExportButton from "./reports/ReportPDFExportButton";
 import { 
   Plus, Search, Edit, Trash2, Calendar, Check, X, Save, 
-  FileSpreadsheet, Printer, RefreshCw, Calculator, Ban, Info, AlertTriangle,
+  FileSpreadsheet, RefreshCw, Calculator, Ban, Info, AlertTriangle,
   LayoutDashboard, FileText, CheckCircle2, ShieldAlert, Clock, ArrowRight,
   Sliders, Settings, ChevronRight, Download, Filter, UserCheck, Layers, Award,
   HeartPulse, UserPlus, Users, DollarSign, ExternalLink, ShieldCheck, Stethoscope, Building2, Upload
@@ -559,6 +563,107 @@ export default function MedicalManagement({
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+  };
+
+  const buildMedicalReportPayload = (): ReportExportPayload => {
+    const generatedAt = formatReportDateTime();
+    if (reportView === "summary") {
+      const totalEmp = employeeMedicalSummaries.reduce((s, x) => s + x.empExpenses, 0);
+      const totalFam = employeeMedicalSummaries.reduce((s, x) => s + x.familyExpenses, 0);
+      const totalAll = employeeMedicalSummaries.reduce((s, x) => s + x.totalExpenses, 0);
+      const totalRem = employeeMedicalSummaries.reduce((s, x) => s + x.remainingAllocation, 0);
+      return {
+        reportTitle: "Medical Expense Allocation Summary Report",
+        filePrefix: "Medical_Report",
+        reportSubtitle: "Employee & Family Medical Benefit Utilization Summary (ETB)",
+        generatedAt,
+        generatedBy: currentUser?.fullName || currentUser?.email,
+        orientation: "landscape",
+        summaryMetrics: [
+          { label: "Employees Covered", value: `${employeeMedicalSummaries.length}` },
+          { label: "Employee Medical", value: `${totalEmp.toLocaleString()} ETB` },
+          { label: "Family Medical", value: `${totalFam.toLocaleString()} ETB` },
+          { label: "Total Medical Spend", value: `${totalAll.toLocaleString()} ETB` }
+        ],
+        columns: [
+          { header: "Employee ID" },
+          { header: "Employee Name" },
+          { header: "Department" },
+          { header: "Emp Medical (ETB)", align: "right" },
+          { header: "Family Medical (ETB)", align: "right" },
+          { header: "Total Expenses (ETB)", align: "right" },
+          { header: "Family Cap (ETB)", align: "right" },
+          { header: "Remaining Pool (ETB)", align: "right" }
+        ],
+        rows: employeeMedicalSummaries.map(s => {
+          const dObj = departments.find(d => d.id === s.departmentId);
+          return [
+            s.employeeId,
+            s.fullName,
+            dObj?.name || "N/A",
+            `${s.empExpenses.toLocaleString()} ETB`,
+            `${s.familyExpenses.toLocaleString()} ETB`,
+            `${s.totalExpenses.toLocaleString()} ETB`,
+            `${s.allocatedFamilyLimit.toLocaleString()} ETB`,
+            `${s.remainingAllocation.toLocaleString()} ETB`
+          ];
+        }),
+        totalsRow: [
+          "TOTAL",
+          `${employeeMedicalSummaries.length} Employees`,
+          "",
+          `${totalEmp.toLocaleString()} ETB`,
+          `${totalFam.toLocaleString()} ETB`,
+          `${totalAll.toLocaleString()} ETB`,
+          "",
+          `${totalRem.toLocaleString()} ETB`
+        ]
+      };
+    }
+
+    const totalClaims = medicalExpenses.reduce((s, m) => s + m.amountETB, 0);
+    return {
+      reportTitle: "Medical Expense Claims Audit Log Report",
+      filePrefix: "Medical_Claims_Report",
+      reportSubtitle: "Itemized Medical Expense Claims Registry (ETB)",
+      generatedAt,
+      generatedBy: currentUser?.fullName || currentUser?.email,
+      orientation: "landscape",
+      summaryMetrics: [
+        { label: "Total Claims", value: `${medicalExpenses.length}` },
+        { label: "Total Claim Amount", value: `${totalClaims.toLocaleString()} ETB` }
+      ],
+      columns: [
+        { header: "Claim ID" },
+        { header: "Employee ID" },
+        { header: "Beneficiary" },
+        { header: "Medical Service" },
+        { header: "Facility" },
+        { header: "Invoice #" },
+        { header: "Date" },
+        { header: "Amount (ETB)", align: "right" }
+      ],
+      rows: medicalExpenses.map(m => [
+        m.id,
+        m.employeeId,
+        `${m.beneficiaryName} (${m.relationship})`,
+        m.medicalService,
+        m.facilityName,
+        m.invoiceNumber,
+        m.expenseDate,
+        `${m.amountETB.toLocaleString()} ETB`
+      ]),
+      totalsRow: [
+        "TOTAL",
+        `${medicalExpenses.length} Claims`,
+        "",
+        "",
+        "",
+        "",
+        "",
+        `${totalClaims.toLocaleString()} ETB`
+      ]
+    };
   };
 
   return (
@@ -1227,7 +1332,7 @@ export default function MedicalManagement({
       {/* ========================================== */}
       {activeSubTab === "reports" && (
         <div className="space-y-4 animate-in fade-in duration-200">
-          <div className="bg-white border rounded-xl p-4 shadow-2xs flex flex-col md:flex-row justify-between items-center gap-3">
+          <div className="bg-white border rounded-xl p-4 shadow-2xs flex flex-col lg:flex-row justify-between items-start lg:items-center gap-3 no-print">
             <div className="flex items-center gap-2">
               <span className="p-1.5 bg-rose-50 text-rose-600 rounded-lg">
                 <FileSpreadsheet className="h-4 w-4" />
@@ -1235,7 +1340,7 @@ export default function MedicalManagement({
               <h3 className="text-xs font-extrabold text-slate-800 uppercase tracking-wider">Medical Expense Compliance &amp; Audit Reports</h3>
             </div>
 
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2 w-full lg:w-auto justify-end">
               <select
                 value={reportView}
                 onChange={(e) => setReportView(e.target.value as any)}
@@ -1247,37 +1352,48 @@ export default function MedicalManagement({
 
               {canExport && (
                 <>
+                  <ReportPrintButton
+                    printData={buildMedicalReportPayload}
+                    companyConfig={companyConfig}
+                    id="btn-print-medical-report"
+                  />
+                  <ReportPDFExportButton
+                    reportData={buildMedicalReportPayload}
+                    companyConfig={companyConfig}
+                    id="btn-pdf-medical-report"
+                  />
                   <button
+                    type="button"
                     onClick={handleExportCSV}
-                    className="px-3 py-1.5 bg-emerald-600 text-white font-bold text-xs rounded-lg hover:bg-emerald-700 flex items-center gap-1"
+                    className="px-3 py-1.5 bg-emerald-600 text-white font-bold text-xs rounded-lg hover:bg-emerald-700 flex items-center gap-1.5 shadow-2xs"
                   >
                     <Download className="h-3.5 w-3.5" /> Export Excel
-                  </button>
-
-                  <button
-                    onClick={() => window.print()}
-                    className="px-3 py-1.5 bg-slate-700 text-white font-bold text-xs rounded-lg hover:bg-slate-800 flex items-center gap-1"
-                  >
-                    <Printer className="h-3.5 w-3.5" /> Print PDF
                   </button>
                 </>
               )}
             </div>
           </div>
 
-          <div className="bg-white border rounded-xl overflow-hidden shadow-2xs">
+          <div className="bg-white border rounded-xl p-6 sm:p-8 shadow-2xs printable-canvas">
+            <CompanyReportHeader
+              companyConfig={companyConfig}
+              reportTitle={reportView === "summary" ? "Medical Expense Allocation Summary Report" : "Medical Expense Claims Audit Log"}
+              reportSubtitle="Ethiopian Reinsurance S.C. Staff &amp; Family Medical Benefit Compliance"
+              generatedBy={currentUser?.fullName || currentUser?.email}
+            />
+
             <div className="overflow-x-auto">
               {reportView === "summary" && (
-                <table className="w-full text-left text-xs border-collapse">
+                <table className="w-full text-left text-xs border-collapse border">
                   <thead>
                     <tr className="bg-slate-50 border-b text-[10px] font-bold text-slate-500 uppercase">
-                      <th className="p-3">Employee ID</th>
-                      <th className="p-3">Employee Name</th>
-                      <th className="p-3">Department</th>
-                      <th className="p-3 text-right">Emp Medical (ETB)</th>
-                      <th className="p-3 text-right">Family Medical (ETB)</th>
-                      <th className="p-3 text-right">Total Expenses (ETB)</th>
-                      <th className="p-3 text-right">Configured Family Cap</th>
+                      <th className="p-3 border-r">Employee ID</th>
+                      <th className="p-3 border-r">Employee Name</th>
+                      <th className="p-3 border-r">Department</th>
+                      <th className="p-3 border-r text-right">Emp Medical (ETB)</th>
+                      <th className="p-3 border-r text-right">Family Medical (ETB)</th>
+                      <th className="p-3 border-r text-right">Total Expenses (ETB)</th>
+                      <th className="p-3 border-r text-right">Configured Family Cap</th>
                       <th className="p-3 text-right bg-slate-100 font-extrabold">Remaining Family Pool</th>
                     </tr>
                   </thead>
@@ -1286,49 +1402,69 @@ export default function MedicalManagement({
                       const dObj = departments.find(d => d.id === s.departmentId);
                       return (
                         <tr key={s.employeeId} className="hover:bg-slate-50">
-                          <td className="p-3 font-bold text-primary-custom">{s.employeeId}</td>
-                          <td className="p-3 font-semibold text-slate-800">{s.fullName}</td>
-                          <td className="p-3 text-slate-500 font-medium">{dObj?.name || "N/A"}</td>
-                          <td className="p-3 text-right text-blue-700 font-bold">{s.empExpenses.toLocaleString()} ETB</td>
-                          <td className="p-3 text-right text-amber-700 font-bold">{s.familyExpenses.toLocaleString()} ETB</td>
-                          <td className="p-3 text-right font-extrabold text-slate-900">{s.totalExpenses.toLocaleString()} ETB</td>
-                          <td className="p-3 text-right text-slate-600 font-semibold">{s.allocatedFamilyLimit.toLocaleString()} ETB</td>
+                          <td className="p-3 border-r font-bold text-primary-custom">{s.employeeId}</td>
+                          <td className="p-3 border-r font-semibold text-slate-800">{s.fullName}</td>
+                          <td className="p-3 border-r text-slate-500 font-medium">{dObj?.name || "N/A"}</td>
+                          <td className="p-3 border-r text-right text-blue-700 font-bold">{s.empExpenses.toLocaleString()} ETB</td>
+                          <td className="p-3 border-r text-right text-amber-700 font-bold">{s.familyExpenses.toLocaleString()} ETB</td>
+                          <td className="p-3 border-r text-right font-extrabold text-slate-900">{s.totalExpenses.toLocaleString()} ETB</td>
+                          <td className="p-3 border-r text-right text-slate-600 font-semibold">{s.allocatedFamilyLimit.toLocaleString()} ETB</td>
                           <td className="p-3 text-right font-extrabold bg-slate-50 text-emerald-700">{s.remainingAllocation.toLocaleString()} ETB</td>
                         </tr>
                       );
                     })}
                   </tbody>
+                  {employeeMedicalSummaries.length > 0 && (
+                    <tfoot>
+                      <tr className="bg-slate-100 border-t-2 border-slate-300 font-extrabold text-slate-900">
+                        <td className="p-3 border-r" colSpan={3}>TOTAL ({employeeMedicalSummaries.length} Employees)</td>
+                        <td className="p-3 border-r text-right">{employeeMedicalSummaries.reduce((s, x) => s + x.empExpenses, 0).toLocaleString()} ETB</td>
+                        <td className="p-3 border-r text-right">{employeeMedicalSummaries.reduce((s, x) => s + x.familyExpenses, 0).toLocaleString()} ETB</td>
+                        <td className="p-3 border-r text-right">{employeeMedicalSummaries.reduce((s, x) => s + x.totalExpenses, 0).toLocaleString()} ETB</td>
+                        <td className="p-3 border-r text-right"></td>
+                        <td className="p-3 text-right">{employeeMedicalSummaries.reduce((s, x) => s + x.remainingAllocation, 0).toLocaleString()} ETB</td>
+                      </tr>
+                    </tfoot>
+                  )}
                 </table>
               )}
 
               {reportView === "claims" && (
-                <table className="w-full text-left text-xs border-collapse">
+                <table className="w-full text-left text-xs border-collapse border">
                   <thead>
                     <tr className="bg-slate-50 border-b text-[10px] font-bold text-slate-500 uppercase">
-                      <th className="p-3">Claim ID</th>
-                      <th className="p-3">Employee ID</th>
-                      <th className="p-3">Beneficiary</th>
-                      <th className="p-3">Medical Service</th>
-                      <th className="p-3">Facility</th>
-                      <th className="p-3">Invoice #</th>
-                      <th className="p-3">Date</th>
+                      <th className="p-3 border-r">Claim ID</th>
+                      <th className="p-3 border-r">Employee ID</th>
+                      <th className="p-3 border-r">Beneficiary</th>
+                      <th className="p-3 border-r">Medical Service</th>
+                      <th className="p-3 border-r">Facility</th>
+                      <th className="p-3 border-r">Invoice #</th>
+                      <th className="p-3 border-r">Date</th>
                       <th className="p-3 text-right">Amount (ETB)</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
                     {medicalExpenses.map(m => (
                       <tr key={m.id} className="hover:bg-slate-50">
-                        <td className="p-3 font-bold text-primary-custom">{m.id}</td>
-                        <td className="p-3 font-semibold text-slate-800">{m.employeeId}</td>
-                        <td className="p-3 font-semibold text-slate-800">{m.beneficiaryName} ({m.relationship})</td>
-                        <td className="p-3 text-slate-600">{m.medicalService}</td>
-                        <td className="p-3 text-slate-600">{m.facilityName}</td>
-                        <td className="p-3 font-bold text-slate-800">{m.invoiceNumber}</td>
-                        <td className="p-3 text-slate-500">{m.expenseDate}</td>
+                        <td className="p-3 border-r font-bold text-primary-custom">{m.id}</td>
+                        <td className="p-3 border-r font-semibold text-slate-800">{m.employeeId}</td>
+                        <td className="p-3 border-r font-semibold text-slate-800">{m.beneficiaryName} ({m.relationship})</td>
+                        <td className="p-3 border-r text-slate-600">{m.medicalService}</td>
+                        <td className="p-3 border-r text-slate-600">{m.facilityName}</td>
+                        <td className="p-3 border-r font-bold text-slate-800">{m.invoiceNumber}</td>
+                        <td className="p-3 border-r text-slate-500">{m.expenseDate}</td>
                         <td className="p-3 text-right font-extrabold text-slate-900">{m.amountETB.toLocaleString()} ETB</td>
                       </tr>
                     ))}
                   </tbody>
+                  {medicalExpenses.length > 0 && (
+                    <tfoot>
+                      <tr className="bg-slate-100 border-t-2 border-slate-300 font-extrabold text-slate-900">
+                        <td className="p-3 border-r" colSpan={7}>TOTAL ({medicalExpenses.length} Claims)</td>
+                        <td className="p-3 text-right">{medicalExpenses.reduce((s, m) => s + m.amountETB, 0).toLocaleString()} ETB</td>
+                      </tr>
+                    </tfoot>
+                  )}
                 </table>
               )}
             </div>

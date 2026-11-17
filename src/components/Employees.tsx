@@ -1,9 +1,12 @@
 import React, { useState, useEffect } from "react";
-import { Employee, Department, User, FamilyMember, ModulePermission } from "../types";
+import { Employee, Department, User, FamilyMember, ModulePermission, CompanyConfig } from "../types";
 import { getDepartmentHeadManagedDeptIds } from "../utils/rbacUtils";
+import { formatReportDateTime, ReportExportPayload } from "../utils/reportBranding";
+import ReportPrintButton from "./reports/ReportPrintButton";
+import ReportPDFExportButton from "./reports/ReportPDFExportButton";
 import { 
   Plus, Search, SlidersHorizontal, Eye, Edit, UserX, UserCheck, 
-  X, Save, FileSpreadsheet, Printer, Download, EyeOff, FileText, ExternalLink, Heart,
+  X, Save, FileSpreadsheet, Download, EyeOff, FileText, ExternalLink, Heart,
   Upload, CheckCircle2, AlertCircle, FileUp, RefreshCw, Trash2
 } from "lucide-react";
 
@@ -45,6 +48,7 @@ interface EmployeesProps {
   employees: Employee[];
   departments: Department[];
   familyMembers?: FamilyMember[];
+  companyConfig?: CompanyConfig;
   currentUser: User | null;
   initialSubTab?: string;
   permissions?: ModulePermission;
@@ -60,6 +64,7 @@ export default function Employees({
   employees,
   departments,
   familyMembers = [],
+  companyConfig,
   currentUser,
   initialSubTab,
   permissions,
@@ -650,8 +655,58 @@ export default function Employees({
     setImportSummaryOpen(true);
   };
 
-  const handlePrint = () => {
-    window.print();
+  const buildEmployeeReportPayload = (): ReportExportPayload => {
+    const deptName = departments.find(d => d.id === filterDepartment)?.name || "All Departments";
+    const activeCount = filteredEmployees.filter(e => e.status === "Active").length;
+    const inactiveCount = filteredEmployees.filter(e => e.status === "Inactive").length;
+    return {
+      reportTitle: "Employee Master Directory Report",
+      filePrefix: "Employee_Report",
+      reportSubtitle: `Status: ${filterStatus || "All Statuses"} | Type: ${filterType || "All Types"}${searchTerm ? ` | Search: "${searchTerm}"` : ""}`,
+      departmentOrUnit: deptName,
+      generatedAt: formatReportDateTime(),
+      generatedBy: currentUser?.fullName || currentUser?.email,
+      orientation: "landscape",
+      summaryMetrics: [
+        { label: "Total Personnel", value: `${filteredEmployees.length}` },
+        { label: "Active Staff", value: `${activeCount}` },
+        { label: "Inactive Staff", value: `${inactiveCount}` }
+      ],
+      columns: [
+        { header: "Employee ID" },
+        { header: "Full Name" },
+        { header: "Department" },
+        { header: "Position" },
+        { header: "Type", align: "center" },
+        { header: "Hire Date" },
+        { header: "Phone" },
+        { header: "Status", align: "center" }
+      ],
+      rows: filteredEmployees.map(e => {
+        const dName = departments.find(d => d.id === e.departmentId)?.name || e.departmentId;
+        return [
+          e.employeeId,
+          e.fullName,
+          dName,
+          e.position || "-",
+          e.employmentType,
+          e.hireDate,
+          e.phoneNumber || "-",
+          e.status
+        ];
+      }),
+      totalsRow: [
+        "TOTAL",
+        `${filteredEmployees.length} Employees`,
+        "",
+        "",
+        "",
+        "",
+        "",
+        `${activeCount} Active`
+      ],
+      emptyMessage: "No employees matching filter requirements found."
+    };
   };
 
   const handleExportCSV = () => {
@@ -829,21 +884,23 @@ export default function Employees({
           )}
           {canExport && (
             <>
+              <ReportPrintButton
+                printData={buildEmployeeReportPayload}
+                companyConfig={companyConfig}
+                id="btn-print-employees"
+              />
+              <ReportPDFExportButton
+                reportData={buildEmployeeReportPayload}
+                companyConfig={companyConfig}
+                id="btn-pdf-employees"
+              />
               <button
                 onClick={handleExportCSV}
-                className="flex-1 sm:flex-initial flex items-center justify-center gap-1.5 px-3 py-1.5 border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold rounded-lg transition-all"
+                className="flex-1 sm:flex-initial flex items-center justify-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-lg shadow-2xs transition-all"
                 id="btn-export-employees"
               >
-                <FileSpreadsheet className="h-4 w-4 text-emerald-600" />
-                <span>Export CSV</span>
-              </button>
-              <button
-                onClick={handlePrint}
-                className="flex-1 sm:flex-initial flex items-center justify-center gap-1.5 px-3 py-1.5 border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold rounded-lg transition-all"
-                id="btn-print-employees"
-              >
-                <Printer className="h-4 w-4 text-slate-600" />
-                <span>Print List</span>
+                <FileSpreadsheet className="h-3.5 w-3.5" />
+                <span>Export Excel</span>
               </button>
             </>
           )}

@@ -226,6 +226,55 @@ app.get('/api/email/status', (_req, res) => {
   });
 });
 
+// Safe proxy endpoint for embedding Firebase Storage / HTTPS company logos into client PDF exports without CORS taint
+app.get('/api/logo-proxy', async (req, res) => {
+  const rawUrl = typeof req.query.url === 'string' ? req.query.url.trim() : '';
+  if (!rawUrl) {
+    return res.status(400).json({ error: 'Missing url query parameter' });
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    return res.status(400).json({ error: 'Invalid URL' });
+  }
+
+  const allowedHosts = [
+    'firebasestorage.googleapis.com',
+    'storage.googleapis.com',
+    'www.ethiopianre.com',
+    'ethiopianre.com'
+  ];
+  const hostAllowed =
+    parsed.protocol === 'https:' &&
+    allowedHosts.some(h => parsed.hostname === h || parsed.hostname.endsWith(`.${h}`));
+
+  if (!hostAllowed) {
+    return res.status(403).json({ error: 'Logo host not permitted' });
+  }
+
+  try {
+    const upstream = await fetch(parsed.toString());
+    if (!upstream.ok) {
+      return res.status(upstream.status).json({ error: `Failed to fetch logo (${upstream.status})` });
+    }
+    const contentType = upstream.headers.get('content-type') || '';
+    if (!contentType.startsWith('image/')) {
+      return res.status(415).json({ error: 'Upstream resource is not an image' });
+    }
+    const buffer = Buffer.from(await upstream.arrayBuffer());
+    if (buffer.length > 2 * 1024 * 1024) {
+      return res.status(413).json({ error: 'Logo image exceeds 2MB limit' });
+    }
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Cache-Control', 'public, max-age=300');
+    return res.send(buffer);
+  } catch (err: any) {
+    return res.status(502).json({ error: err?.message || 'Unable to proxy logo image' });
+  }
+});
+
 // Vite middleware in dev mode
 async function startServer() {
   if (process.env.NODE_ENV !== 'production') {

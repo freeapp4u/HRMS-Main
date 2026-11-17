@@ -230,10 +230,43 @@ export default function HelpCenter({ onClose, companyName }: HelpCenterProps) {
                     It is designed to manage employee resources with precision, adherence to organizational policies, 
                     and operational security.
                   </p>
-                  <div className="p-4 bg-slate-50 rounded-lg space-y-1 text-slate-600 mt-4">
-                    <p className="font-bold text-slate-800">System Support Contacts:</p>
-                    <p>📧 Email: support@ethiopianre.com</p>
-                    <p>📞 Phone: +251-115-575757 (Ext: 104 - IT Dept)</p>
+                  <div className="p-4 bg-slate-50 rounded-lg space-y-1.5 text-slate-600 mt-4">
+                    <p className="font-bold text-slate-800">System Support Contacts</p>
+                    <p className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
+                      <span>📧 Email:</span>
+                      <a
+                        href="mailto:itofficer@ethiopianre.com"
+                        className="text-[var(--primary-color,#002B5B)] hover:underline font-medium break-all"
+                      >
+                        itofficer@ethiopianre.com
+                      </a>
+                      <span>or</span>
+                      <a
+                        href="mailto:databaseadmin@ethiopianre.com"
+                        className="text-[var(--primary-color,#002B5B)] hover:underline font-medium break-all"
+                      >
+                        databaseadmin@ethiopianre.com
+                      </a>
+                    </p>
+                    <p className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
+                      <span>📞 Phone:</span>
+                      <a
+                        href="tel:0932083373"
+                        className="text-[var(--primary-color,#002B5B)] hover:underline font-medium whitespace-nowrap"
+                      >
+                        0932083373
+                      </a>
+                      <span className="text-slate-400">|</span>
+                      <span className="whitespace-nowrap">
+                        <a
+                          href="tel:0919410712"
+                          className="text-[var(--primary-color,#002B5B)] hover:underline font-medium"
+                        >
+                          0919410712
+                        </a>{" "}
+                        (IT Support)
+                      </span>
+                    </p>
                     <p>🏢 Location: Africa Avenue, Addis Ababa, Ethiopia</p>
                   </div>
                   <div className="text-center pt-8 text-slate-400">

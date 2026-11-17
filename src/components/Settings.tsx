@@ -6,6 +6,9 @@ import {
 } from "lucide-react";
 import RoleMatrix from "./RoleMatrix";
 import { uploadFileToStorage, deleteFileFromStorage } from "../firebase";
+import ReportPrintButton from "./reports/ReportPrintButton";
+import ReportPDFExportButton from "./reports/ReportPDFExportButton";
+import { formatReportDateTime, ReportExportPayload } from "../utils/reportBranding";
 
 interface SettingsProps {
   config: CompanyConfig;
@@ -52,6 +55,9 @@ export default function Settings({
   const canCreate = permissions ? permissions.actions.create : currentUser?.role !== "Auditor";
   const canEdit = permissions ? permissions.actions.edit : currentUser?.role !== "Auditor";
   const canDelete = permissions ? permissions.actions.delete : currentUser?.role !== "Auditor";
+  const canExport = permissions
+    ? permissions.actions.export
+    : currentUser?.role === "Administrator" || currentUser?.role === "Auditor" || currentUser?.role === "HR Officer";
 
   const allowedSubTabs = [
     { id: "profile", label: "Company Profile", icon: Building },
@@ -766,11 +772,49 @@ export default function Settings({
         )}
 
         {/* TAB 3: PUBLIC HOLIDAYS */}
-        {activeSubTab === "holidays" && (
+        {activeSubTab === "holidays" && (() => {
+          const buildHolidaysReportPayload = (): ReportExportPayload => ({
+            reportTitle: "Official Public Holidays Calendar Report",
+            reportSubtitle: "Statutory Ethiopian Public Holidays Excluded from Leave Calculations",
+            filePrefix: "Public_Holidays_Report",
+            generatedAt: formatReportDateTime(),
+            generatedBy: currentUser?.fullName || currentUser?.email || "Administrator",
+            orientation: "portrait",
+            summaryMetrics: [
+              { label: "Total Registered Holidays", value: String(holidays.length) }
+            ],
+            columns: [
+              { header: "#", align: "center" },
+              { header: "Holiday Name", align: "left" },
+              { header: "Observed Date", align: "left" }
+            ],
+            rows: holidays.map((h, i) => [i + 1, h.name, h.date]),
+            emptyMessage: "No public holidays registered."
+          });
+
+          return (
           <div className="space-y-6">
-            <div>
-              <h3 className="font-extrabold text-slate-800 text-base">Public Holidays</h3>
-              <p className="text-xs text-slate-500 mt-1">Add legal public holidays. The leave management module automatically references this list to exclude these dates from booked leave totals.</p>
+            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
+              <div>
+                <h3 className="font-extrabold text-slate-800 text-base">Public Holidays</h3>
+                <p className="text-xs text-slate-500 mt-1">Add legal public holidays. The leave management module automatically references this list to exclude these dates from booked leave totals.</p>
+              </div>
+              {canExport && (
+                <div className="flex flex-wrap items-center gap-2">
+                  <ReportPrintButton
+                    printData={buildHolidaysReportPayload}
+                    companyConfig={config}
+                    orientation="portrait"
+                    label="Print"
+                  />
+                  <ReportPDFExportButton
+                    reportData={buildHolidaysReportPayload}
+                    companyConfig={config}
+                    orientation="portrait"
+                    label="Export PDF"
+                  />
+                </div>
+              )}
             </div>
 
             {/* Add Holiday Inline Form */}
@@ -847,28 +891,82 @@ export default function Settings({
               </table>
             </div>
           </div>
-        )}
+          );
+        })()}
 
 
 
         {/* TAB 4: USER MANAGEMENT */}
-        {activeSubTab === "users" && (
+        {activeSubTab === "users" && (() => {
+          const buildUserDirectoryPayload = (): ReportExportPayload => {
+            const activeCount = users.filter(u => u.status === "Active").length;
+            const verifiedCount = users.filter(u => u.emailVerified).length;
+            return {
+              reportTitle: "System User Directory & Security Report",
+              reportSubtitle: "Authorized Portal Accounts, Assigned Roles & Verification Audit",
+              filePrefix: "User_Directory_Report",
+              generatedAt: formatReportDateTime(),
+              generatedBy: currentUser?.fullName || currentUser?.email || "Administrator",
+              orientation: "landscape",
+              summaryMetrics: [
+                { label: "Total Accounts", value: String(users.length) },
+                { label: "Active Users", value: String(activeCount) },
+                { label: "Email Verified", value: String(verifiedCount) }
+              ],
+              columns: [
+                { header: "Full Name", align: "left" },
+                { header: "Email Address", align: "left" },
+                { header: "Assigned Role", align: "left" },
+                { header: "Verification", align: "center" },
+                { header: "Account Status", align: "center" },
+                { header: "Created Date", align: "left" },
+                { header: "Last Login", align: "left" }
+              ],
+              rows: users.map(u => [
+                u.fullName,
+                u.email,
+                u.role,
+                u.emailVerified ? "Verified" : "Not Verified",
+                u.status,
+                u.createdDate || "-",
+                u.lastLogin || "Never"
+              ])
+            };
+          };
+
+          return (
           <div className="space-y-6">
-            <div className="flex justify-between items-center">
+            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
               <div>
                 <h3 className="font-extrabold text-slate-800 text-base">User Directory &amp; Security</h3>
                 <p className="text-xs text-slate-500 mt-1">Manage personnel authorized to operate this portal (Admins and HR Officers).</p>
               </div>
-              {canCreate && (
-                <button
-                  type="button"
-                  onClick={handleOpenAddUser}
-                  className="px-3 py-1.5 bg-primary-custom hover:opacity-95 text-white text-xs font-bold rounded-lg flex items-center gap-1 transition-all shadow-sm"
-                >
-                  <Plus className="h-3.5 w-3.5" />
-                  <span>Add User</span>
-                </button>
-              )}
+              <div className="flex flex-wrap items-center gap-2">
+                {canExport && (
+                  <>
+                    <ReportPrintButton
+                      printData={buildUserDirectoryPayload}
+                      companyConfig={config}
+                      label="Print"
+                    />
+                    <ReportPDFExportButton
+                      reportData={buildUserDirectoryPayload}
+                      companyConfig={config}
+                      label="Export PDF"
+                    />
+                  </>
+                )}
+                {canCreate && (
+                  <button
+                    type="button"
+                    onClick={handleOpenAddUser}
+                    className="px-3 py-1.5 bg-primary-custom hover:opacity-95 text-white text-xs font-bold rounded-lg flex items-center gap-1 transition-all shadow-sm"
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                    <span>Add User</span>
+                  </button>
+                )}
+              </div>
             </div>
 
             {/* Users table */}
@@ -987,7 +1085,8 @@ export default function Settings({
               </table>
             </div>
           </div>
-        )}
+          );
+        })()}
 
         {/* TAB 5: DYNAMIC ROLES AND PERMISSIONS MATRIX */}
         <RoleMatrixView 
@@ -996,9 +1095,11 @@ export default function Settings({
           rolePermissions={rolePermissions}
           users={users}
           currentUser={currentUser}
+          companyConfig={config}
           canCreate={canCreate}
           canEdit={canEdit}
           canDelete={canDelete}
+          canExport={canExport}
           onUpdateRoles={onUpdateRoles}
           onUpdateRolePermissions={onUpdateRolePermissions}
           onLogAction={onLogAction}
@@ -1211,7 +1312,7 @@ export default function Settings({
 }
 
 // Subtab Role Matrix Integration
-function RoleMatrixView({ activeSubTab, roles, rolePermissions, users, currentUser, canCreate, canEdit, canDelete, onUpdateRoles, onUpdateRolePermissions, onLogAction }: any) {
+function RoleMatrixView({ activeSubTab, roles, rolePermissions, users, currentUser, companyConfig, canCreate, canEdit, canDelete, canExport, onUpdateRoles, onUpdateRolePermissions, onLogAction }: any) {
   if (activeSubTab !== "roles") return null;
   return (
     <RoleMatrix 
@@ -1219,9 +1320,11 @@ function RoleMatrixView({ activeSubTab, roles, rolePermissions, users, currentUs
       rolePermissions={rolePermissions}
       users={users}
       currentUser={currentUser}
+      companyConfig={companyConfig}
       canCreate={canCreate}
       canEdit={canEdit}
       canDelete={canDelete}
+      canExport={canExport}
       onUpdateRoles={onUpdateRoles}
       onUpdateRolePermissions={onUpdateRolePermissions}
       onLogAction={onLogAction}

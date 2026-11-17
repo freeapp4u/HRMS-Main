@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect } from "react";
-import { SystemRole, RolePermissions, ActionPermissions, User } from "../types";
+import { SystemRole, RolePermissions, ActionPermissions, User, CompanyConfig } from "../types";
 import { APP_MODULES, DEFAULT_ACTIONS } from "../config/permissions";
 import {
   createEmptyModulePermissions,
@@ -11,15 +11,20 @@ import {
   ShieldCheck, Plus, Search, Save, Trash2, AlertTriangle, CheckCircle2,
   Lock, Settings, Users2, X, Info, Edit, Power, RotateCcw
 } from "lucide-react";
+import ReportPrintButton from "./reports/ReportPrintButton";
+import ReportPDFExportButton from "./reports/ReportPDFExportButton";
+import { formatReportDateTime, ReportExportPayload } from "../utils/reportBranding";
 
 interface RoleMatrixProps {
   roles: SystemRole[];
   rolePermissions: RolePermissions[];
   users?: User[];
   currentUser: User | null;
+  companyConfig?: CompanyConfig;
   canCreate?: boolean;
   canEdit?: boolean;
   canDelete?: boolean;
+  canExport?: boolean;
   onUpdateRoles: (roles: SystemRole[], deletedRoleId?: string) => void;
   onUpdateRolePermissions: (perms: RolePermissions[]) => void;
   onLogAction: (module: string, action: string, record: string, details: string) => void;
@@ -30,9 +35,11 @@ export default function RoleMatrix({
   rolePermissions,
   users = [],
   currentUser,
+  companyConfig,
   canCreate = true,
   canEdit = true,
   canDelete = true,
+  canExport = true,
   onUpdateRoles,
   onUpdateRolePermissions,
   onLogAction
@@ -407,6 +414,91 @@ export default function RoleMatrix({
     r.description.toLowerCase().includes(roleSearch.toLowerCase())
   );
 
+  const buildRoleMatrixReportPayload = (): ReportExportPayload => {
+    const activePerm = localPermissions || (selectedRole ? getDefaultRolePermissions(selectedRole.id) : null);
+    const activeRolesCount = roles.filter(r => r.status === "Active").length;
+
+    const roleRows = roles.map(r => {
+      const rp = rolePermissions.find(p => p.roleId === r.id) || getDefaultRolePermissions(r.id);
+      const norm = normalizeRolePermissions(rp);
+      const enabledCount = Object.values(norm.modulePermissions).filter((m: any) => m?.enabled).length;
+      const userCount = users.filter(u => u.role === r.id || u.role === r.name).length;
+      return [
+        r.name,
+        r.isSystem ? "System Role" : "Custom Role",
+        r.status,
+        userCount,
+        `${enabledCount} / ${APP_MODULES.length}`,
+        r.updatedDate || r.createdDate || "-"
+      ];
+    });
+
+    const matrixRows = selectedRole && activePerm
+      ? APP_MODULES.map(mod => {
+          const mp = activePerm.modulePermissions[mod.id];
+          const enabledSubs = mod.submenus
+            .filter(s => mp?.submenus?.[s.id] !== false)
+            .map(s => s.name);
+          return [
+            mod.name,
+            mp?.enabled ? "Enabled" : "Disabled",
+            mod.submenus.length === 0 ? "Standard" : enabledSubs.length > 0 ? enabledSubs.join(", ") : "None",
+            mp?.actions.view ? "Yes" : "No",
+            mp?.actions.create ? "Yes" : "No",
+            mp?.actions.edit ? "Yes" : "No",
+            mp?.actions.delete ? "Yes" : "No",
+            mp?.actions.approve ? "Yes" : "No",
+            mp?.actions.export ? "Yes" : "No"
+          ];
+        })
+      : [];
+
+    return {
+      reportTitle: "User Roles & Access Permissions Matrix Report",
+      reportSubtitle: selectedRole
+        ? `System Roles Summary & Module Permission Matrix (${selectedRole.name})`
+        : "System Roles & Dynamic RBAC Authorization Register",
+      filePrefix: "User_And_Role_Permissions_Report",
+      generatedAt: formatReportDateTime(),
+      generatedBy: currentUser?.fullName || currentUser?.email || "Administrator",
+      orientation: "landscape",
+      summaryMetrics: [
+        { label: "Total Roles", value: String(roles.length) },
+        { label: "Active Roles", value: String(activeRolesCount) },
+        { label: "Assigned Users", value: String(users.length) },
+        { label: "Selected Role", value: selectedRole?.name || "-" }
+      ],
+      columns: [
+        { header: "Role Name", align: "left" },
+        { header: "Type", align: "center" },
+        { header: "Status", align: "center" },
+        { header: "Assigned Users", align: "center" },
+        { header: "Enabled Modules", align: "center" },
+        { header: "Last Updated", align: "left" }
+      ],
+      rows: roleRows,
+      additionalTables: selectedRole && activePerm
+        ? [
+            {
+              title: `Permission Matrix Detail: ${selectedRole.name}`,
+              columns: [
+                { header: "Module", align: "left" },
+                { header: "Access", align: "center" },
+                { header: "Enabled Submenus", align: "left" },
+                { header: "View", align: "center" },
+                { header: "Create", align: "center" },
+                { header: "Edit", align: "center" },
+                { header: "Delete", align: "center" },
+                { header: "Approve", align: "center" },
+                { header: "Export", align: "center" }
+              ],
+              rows: matrixRows
+            }
+          ]
+        : undefined
+    };
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
@@ -419,39 +511,55 @@ export default function RoleMatrix({
             Configure dynamic module, submenu, and action permissions per role. Saved changes apply immediately.
           </p>
         </div>
-        {canEdit && (
-          <div className="flex items-center gap-2 flex-wrap">
-            {canCreate && (
+        <div className="flex items-center gap-2 flex-wrap">
+          {canExport && (
+            <>
+              <ReportPrintButton
+                printData={buildRoleMatrixReportPayload}
+                companyConfig={companyConfig}
+                label="Print"
+              />
+              <ReportPDFExportButton
+                reportData={buildRoleMatrixReportPayload}
+                companyConfig={companyConfig}
+                label="Export PDF"
+              />
+            </>
+          )}
+          {canEdit && (
+            <>
+              {canCreate && (
+                <button
+                  type="button"
+                  onClick={handleOpenCreateModal}
+                  className="px-3 py-1.5 bg-white border border-slate-200 text-slate-700 text-xs font-bold rounded-lg hover:bg-slate-50 flex items-center gap-1.5 shadow-xs"
+                >
+                  <Plus className="h-4 w-4" />
+                  New Role
+                </button>
+              )}
+              {hasUnsavedChanges && (
+                <button
+                  type="button"
+                  onClick={handleCancelChanges}
+                  className="px-3 py-1.5 bg-slate-100 border border-slate-200 text-slate-600 text-xs font-bold rounded-lg hover:bg-slate-200 flex items-center gap-1.5"
+                >
+                  <RotateCcw className="h-3.5 w-3.5" />
+                  Cancel
+                </button>
+              )}
               <button
                 type="button"
-                onClick={handleOpenCreateModal}
-                className="px-3 py-1.5 bg-white border border-slate-200 text-slate-700 text-xs font-bold rounded-lg hover:bg-slate-50 flex items-center gap-1.5 shadow-xs"
+                onClick={() => setConfirmSaveOpen(true)}
+                disabled={!hasUnsavedChanges || isSaving}
+                className="px-4 py-1.5 bg-primary-custom text-white text-xs font-black rounded-lg hover:opacity-95 flex items-center gap-1.5 shadow-md disabled:opacity-50"
               >
-                <Plus className="h-4 w-4" />
-                New Role
+                {isSaving ? <Settings className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+                Save &amp; Apply
               </button>
-            )}
-            {hasUnsavedChanges && (
-              <button
-                type="button"
-                onClick={handleCancelChanges}
-                className="px-3 py-1.5 bg-slate-100 border border-slate-200 text-slate-600 text-xs font-bold rounded-lg hover:bg-slate-200 flex items-center gap-1.5"
-              >
-                <RotateCcw className="h-3.5 w-3.5" />
-                Cancel
-              </button>
-            )}
-            <button
-              type="button"
-              onClick={() => setConfirmSaveOpen(true)}
-              disabled={!hasUnsavedChanges || isSaving}
-              className="px-4 py-1.5 bg-primary-custom text-white text-xs font-black rounded-lg hover:opacity-95 flex items-center gap-1.5 shadow-md disabled:opacity-50"
-            >
-              {isSaving ? <Settings className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
-              Save &amp; Apply
-            </button>
-          </div>
-        )}
+            </>
+          )}
+        </div>
       </div>
 
       {statusBanner && (

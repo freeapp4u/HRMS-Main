@@ -1,11 +1,15 @@
 import React, { useState } from "react";
-import { Department, Employee, User, ModulePermission } from "../types";
+import { Department, Employee, User, ModulePermission, CompanyConfig } from "../types";
 import { getDepartmentHeadManagedDeptIds } from "../utils/rbacUtils";
+import { formatReportDateTime, ReportExportPayload } from "../utils/reportBranding";
+import ReportPrintButton from "./reports/ReportPrintButton";
+import ReportPDFExportButton from "./reports/ReportPDFExportButton";
 import { Plus, Search, Landmark, Edit, Trash2, X, Save, AlertTriangle } from "lucide-react";
 
 interface DepartmentsProps {
   departments: Department[];
   employees: Employee[];
+  companyConfig?: CompanyConfig;
   currentUser: User | null;
   permissions?: ModulePermission;
   onAddDepartment: (dept: Department) => boolean;
@@ -17,6 +21,7 @@ interface DepartmentsProps {
 export default function Departments({
   departments,
   employees,
+  companyConfig,
   currentUser,
   permissions,
   onAddDepartment,
@@ -27,6 +32,7 @@ export default function Departments({
   const canCreate = permissions ? permissions.actions.create : currentUser?.role !== "Auditor";
   const canEdit = permissions ? permissions.actions.edit : currentUser?.role !== "Auditor";
   const canDelete = permissions ? permissions.actions.delete : currentUser?.role !== "Auditor";
+  const canExport = permissions ? permissions.actions.export : true;
   const isDeptHead = currentUser?.role === "Department Head";
   const managedDeptIds = isDeptHead ? getDepartmentHeadManagedDeptIds(currentUser, departments, employees) : [];
 
@@ -232,6 +238,64 @@ export default function Departments({
     }
   };
 
+  const buildDepartmentReportPayload = (): ReportExportPayload => {
+    const totalPersonnel = filteredDepts.reduce(
+      (sum, d) => sum + employees.filter(e => e.departmentId === d.id).length,
+      0
+    );
+    const activePersonnel = filteredDepts.reduce(
+      (sum, d) => sum + employees.filter(e => e.departmentId === d.id && e.status === "Active").length,
+      0
+    );
+    return {
+      reportTitle: "Organizational Departments Summary Report",
+      filePrefix: "Department_Report",
+      reportSubtitle: searchTerm ? `Search Filter: "${searchTerm}"` : "All Authorized Organizational Units",
+      departmentOrUnit: isDeptHead && managedDeptIds.length > 0 ? filteredDepts.map(d => d.name).join(", ") : "All Departments",
+      generatedAt: formatReportDateTime(),
+      generatedBy: currentUser?.fullName || currentUser?.email,
+      orientation: "landscape",
+      summaryMetrics: [
+        { label: "Total Departments", value: `${filteredDepts.length}` },
+        { label: "Active Departments", value: `${filteredDepts.filter(d => d.status === "Active").length}` },
+        { label: "Total Personnel", value: `${totalPersonnel}` }
+      ],
+      columns: [
+        { header: "Code" },
+        { header: "Department Name" },
+        { header: "Department Head" },
+        { header: "Parent Department" },
+        { header: "Active Staff", align: "center" },
+        { header: "Total Staff", align: "center" },
+        { header: "Status", align: "center" }
+      ],
+      rows: filteredDepts.map(d => {
+        const deptEmps = employees.filter(e => e.departmentId === d.id);
+        const headEmp = d.headEmployeeId ? employees.find(e => e.employeeId === d.headEmployeeId) : null;
+        const parentDept = d.parentDepartmentId ? departments.find(p => p.id === d.parentDepartmentId) : null;
+        return [
+          d.code,
+          d.name,
+          headEmp ? headEmp.fullName : (d.headEmployeeId || "-"),
+          parentDept ? parentDept.name : "Root Unit",
+          deptEmps.filter(e => e.status === "Active").length,
+          deptEmps.length,
+          d.status
+        ];
+      }),
+      totalsRow: [
+        "TOTAL",
+        `${filteredDepts.length} Departments`,
+        "",
+        "",
+        activePersonnel,
+        totalPersonnel,
+        ""
+      ],
+      emptyMessage: "No organizational departments match current filter."
+    };
+  };
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -240,16 +304,32 @@ export default function Departments({
           <h2 className="text-xl font-extrabold text-slate-800 tracking-tight">Department Management</h2>
           <p className="text-xs text-slate-500 mt-1">Configure physical &amp; operational organizational units.</p>
         </div>
-        {canCreate && (
-          <button
-            onClick={handleOpenAdd}
-            className="flex items-center justify-center gap-1.5 px-4 py-2 bg-primary-custom hover:opacity-95 text-white text-xs font-bold rounded-lg shadow-sm transition-all"
-            id="btn-add-department-trigger"
-          >
-            <Plus className="h-4 w-4" />
-            <span>Add Department</span>
-          </button>
-        )}
+        <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
+          {canExport && (
+            <>
+              <ReportPrintButton
+                printData={buildDepartmentReportPayload}
+                companyConfig={companyConfig}
+                id="btn-print-departments"
+              />
+              <ReportPDFExportButton
+                reportData={buildDepartmentReportPayload}
+                companyConfig={companyConfig}
+                id="btn-pdf-departments"
+              />
+            </>
+          )}
+          {canCreate && (
+            <button
+              onClick={handleOpenAdd}
+              className="flex items-center justify-center gap-1.5 px-4 py-2 bg-primary-custom hover:opacity-95 text-white text-xs font-bold rounded-lg shadow-sm transition-all"
+              id="btn-add-department-trigger"
+            >
+              <Plus className="h-4 w-4" />
+              <span>Add Department</span>
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Search Input */}

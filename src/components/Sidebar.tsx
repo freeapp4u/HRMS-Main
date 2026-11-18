@@ -1,11 +1,40 @@
-import { 
-  LayoutDashboard, UserCheck, CalendarDays,
-  BarChart3, Users, Landmark, FileText, Palette, Calendar, 
-  Users2, ShieldCheck, History, ChevronDown, ChevronRight, X, FolderOpen, HeartPulse, DollarSign, Mail, Info, Settings, Lock
+import {
+  LayoutDashboard,
+  UserCheck,
+  CalendarDays,
+  BarChart3,
+  Users,
+  Landmark,
+  FileText,
+  Palette,
+  Calendar,
+  Users2,
+  ShieldCheck,
+  History,
+  ChevronDown,
+  ChevronRight,
+  X,
+  FolderOpen,
+  HeartPulse,
+  DollarSign,
+  Mail,
+  Info,
+  Settings,
+  Lock,
+  ClipboardList,
+  Bell,
+  UserCog,
+  LogOut,
 } from "lucide-react";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { RolePermissions, User } from "../types";
-import { APP_MODULES } from "../config/permissions";
+import {
+  APP_MODULES,
+  EMPLOYEE_BLOCKED_ADMIN_MODULES,
+  EMPLOYEE_ESS_MODULE_ORDER,
+  getModuleLabelForRole,
+  getModuleSubmenusForRole,
+} from "../config/permissions";
 import { hasPermission } from "../utils/rbacUtils";
 
 interface SidebarProps {
@@ -13,6 +42,8 @@ interface SidebarProps {
   rolePermissions: RolePermissions | undefined;
   activeTab: string;
   onTabChange: (tabId: string) => void;
+  onLogout?: () => void;
+  unreadNotificationsCount?: number;
   isOpen: boolean;
   onClose: () => void;
   companyName: string;
@@ -35,7 +66,11 @@ const IconMap: { [key: string]: any } = {
   Users2,
   Palette,
   Calendar,
-  Mail
+  Mail,
+  ClipboardList,
+  Bell,
+  UserCog,
+  LogOut,
 };
 
 export default function Sidebar({
@@ -43,36 +78,60 @@ export default function Sidebar({
   rolePermissions,
   activeTab,
   onTabChange,
+  onLogout,
+  unreadNotificationsCount = 0,
   isOpen,
   onClose,
 }: SidebarProps) {
+  const isEmployee = currentUser?.role === "Employee";
+
+  const orderedModules = useMemo(() => {
+    if (!isEmployee) return APP_MODULES;
+    const orderIndex = (id: string) => {
+      const idx = EMPLOYEE_ESS_MODULE_ORDER.indexOf(id);
+      return idx === -1 ? 999 : idx;
+    };
+    return [...APP_MODULES]
+      .filter((m) => !EMPLOYEE_BLOCKED_ADMIN_MODULES.has(m.id))
+      .sort((a, b) => orderIndex(a.id) - orderIndex(b.id));
+  }, [isEmployee]);
+
   const [expandedModules, setExpandedModules] = useState<{ [key: string]: boolean }>(() => {
     const initial: { [key: string]: boolean } = {};
-    APP_MODULES.forEach(m => {
-      if (m.submenus.length > 0) {
+    orderedModules.forEach((m) => {
+      const subs = getModuleSubmenusForRole(m, currentUser?.role);
+      if (subs.length > 0) {
         initial[m.id] = activeTab === m.id || activeTab.startsWith(`${m.id}_`);
       }
     });
     return initial;
   });
 
-  // Auto-expand active module group when activeTab changes externally (e.g., Dashboard links or URL hash)
+  // Auto-expand active module group when activeTab changes externally
   useEffect(() => {
-    APP_MODULES.forEach(m => {
-      if (m.submenus.length > 0 && (activeTab === m.id || activeTab.startsWith(`${m.id}_`))) {
-        setExpandedModules(prev => (prev[m.id] ? prev : { ...prev, [m.id]: true }));
+    orderedModules.forEach((m) => {
+      const subs = getModuleSubmenusForRole(m, currentUser?.role);
+      if (subs.length > 0 && (activeTab === m.id || activeTab.startsWith(`${m.id}_`))) {
+        setExpandedModules((prev) => (prev[m.id] ? prev : { ...prev, [m.id]: true }));
       }
     });
-  }, [activeTab]);
+  }, [activeTab, orderedModules, currentUser?.role]);
 
   const toggleModule = (moduleId: string) => {
-    setExpandedModules(prev => ({
+    setExpandedModules((prev) => ({
       ...prev,
-      [moduleId]: !prev[moduleId]
+      [moduleId]: !prev[moduleId],
     }));
   };
 
   const navigateTo = (tabId: string) => {
+    if (tabId === "account_logout" && onLogout) {
+      onLogout();
+      if (window.innerWidth < 1024) {
+        onClose();
+      }
+      return;
+    }
     onTabChange(tabId);
     if (window.innerWidth < 1024) {
       onClose();
@@ -82,8 +141,8 @@ export default function Sidebar({
   const navItemClass = (tabId: string) => {
     const isActive = activeTab === tabId || activeTab.startsWith(tabId + "_");
     return `w-full text-left py-2.5 flex items-center gap-3 text-xs font-semibold tracking-wide transition-all ${
-      isActive 
-        ? "bg-accent-custom/20 text-accent-custom border-l-4 border-accent-custom pl-4 pr-3 rounded-r" 
+      isActive
+        ? "bg-accent-custom/20 text-accent-custom border-l-4 border-accent-custom pl-4 pr-3 rounded-r"
         : "text-slate-300 hover:bg-white/10 hover:text-white pl-5 pr-3 rounded"
     }`;
   };
@@ -97,12 +156,16 @@ export default function Sidebar({
     }`;
   };
 
-  const filteredModules = APP_MODULES.filter(module => {
+  const filteredModules = orderedModules.filter((module) => {
+    if (isEmployee && (EMPLOYEE_BLOCKED_ADMIN_MODULES.has(module.id) || module.id === "medical" || module.id === "help")) {
+      return false;
+    }
     const canViewModule = hasPermission(rolePermissions, module.id, "view");
     if (!canViewModule) return false;
 
-    if (module.submenus.length > 0) {
-      return module.submenus.some(sub => hasPermission(rolePermissions, module.id, "view", sub.id));
+    const submenus = getModuleSubmenusForRole(module, currentUser?.role);
+    if (submenus.length > 0) {
+      return submenus.some((sub) => hasPermission(rolePermissions, module.id, "view", sub.id));
     }
 
     return true;
@@ -111,10 +174,7 @@ export default function Sidebar({
   return (
     <>
       {isOpen && (
-        <div 
-          onClick={onClose}
-          className="fixed inset-0 bg-black/50 z-40 lg:hidden"
-        ></div>
+        <div onClick={onClose} className="fixed inset-0 bg-black/50 z-40 lg:hidden"></div>
       )}
 
       <aside
@@ -125,14 +185,14 @@ export default function Sidebar({
         <div className="flex flex-col flex-1 overflow-y-auto">
           <div className="h-20 px-4 py-3 flex items-center justify-between border-b border-white/10 shrink-0 bg-[#001F44]">
             <div className="flex items-center">
-              <div 
+              <div
                 className="relative p-0.5 rounded-full bg-gradient-to-tr from-[#009A44] via-[#FED100] to-[#E62529] shadow-md shrink-0 transition-transform hover:scale-105"
                 title="Rising with Africa - ETRHRMS"
               >
                 <div className="w-10 h-10 rounded-full bg-[#002B5B] flex items-center justify-center p-1.5 text-[#FED100] border border-white/20 shadow-inner">
-                  <svg 
-                    viewBox="0 0 100 100" 
-                    className="w-full h-full drop-shadow-xs" 
+                  <svg
+                    viewBox="0 0 100 100"
+                    className="w-full h-full drop-shadow-xs"
                     fill="currentColor"
                     xmlns="http://www.w3.org/2000/svg"
                   >
@@ -158,19 +218,25 @@ export default function Sidebar({
           </div>
 
           <div className="p-4 space-y-2">
-            <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400 px-3 mb-2">Navigator</p>
-            
+            <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400 px-3 mb-2">
+              {isEmployee ? "Employee Self-Service" : "Navigator"}
+            </p>
+
             {filteredModules.length === 0 ? (
               <div className="px-3 py-4 text-[11px] text-slate-400 bg-white/5 rounded-lg flex items-center gap-2">
                 <Lock className="h-4 w-4 text-amber-400 shrink-0" />
                 <span>No modules enabled for your current role.</span>
               </div>
             ) : (
-              filteredModules.map(module => {
+              filteredModules.map((module) => {
                 const IconComp = IconMap[module.icon] || FolderOpen;
-                const hasSubmenus = module.submenus.length > 0;
+                const displayLabel = getModuleLabelForRole(module, currentUser?.role);
+                const roleSubmenus = getModuleSubmenusForRole(module, currentUser?.role);
+                const hasSubmenus = roleSubmenus.length > 0;
                 const isExpanded = expandedModules[module.id];
-                const allowedSubmenus = module.submenus.filter(sub => hasPermission(rolePermissions, module.id, "view", sub.id));
+                const allowedSubmenus = roleSubmenus.filter((sub) =>
+                  hasPermission(rolePermissions, module.id, "view", sub.id)
+                );
 
                 if (hasSubmenus && allowedSubmenus.length === 0) return null;
 
@@ -188,30 +254,47 @@ export default function Sidebar({
                         className={navItemClass(module.id)}
                       >
                         <IconComp className="h-4 w-4 shrink-0" />
-                        <span>{module.name}</span>
+                        <span className="flex-1 truncate">{displayLabel}</span>
+                        {module.id === "notifications" && unreadNotificationsCount > 0 && (
+                          <span className="px-1.5 py-0.5 text-[9px] font-black rounded-full bg-amber-400 text-[#001F44]">
+                            {unreadNotificationsCount}
+                          </span>
+                        )}
                       </button>
                       {hasSubmenus && (
                         <button
                           onClick={() => toggleModule(module.id)}
                           className="p-2 text-slate-400 hover:text-white transition-colors"
-                          aria-label={`Toggle ${module.name} submenu`}
+                          aria-label={`Toggle ${displayLabel} submenu`}
                         >
-                          {isExpanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+                          {isExpanded ? (
+                            <ChevronDown className="h-3.5 w-3.5" />
+                          ) : (
+                            <ChevronRight className="h-3.5 w-3.5" />
+                          )}
                         </button>
                       )}
                     </div>
 
                     {hasSubmenus && isExpanded && (
                       <div className="space-y-0.5 pl-2 border-l border-white/10 ml-5 my-1">
-                        {allowedSubmenus.map(sub => (
-                          <button
-                            key={sub.id}
-                            onClick={() => navigateTo(`${module.id}_${sub.id}`)}
-                            className={subNavItemClass(`${module.id}_${sub.id}`)}
-                          >
-                            {sub.name}
-                          </button>
-                        ))}
+                        {allowedSubmenus.map((sub) => {
+                          const isLogoutSub = module.id === "account" && sub.id === "logout";
+                          return (
+                            <button
+                              key={sub.id}
+                              onClick={() => navigateTo(`${module.id}_${sub.id}`)}
+                              className={
+                                isLogoutSub
+                                  ? "w-full text-left pl-9 pr-3 py-2 rounded-lg flex items-center gap-2 text-[11px] font-semibold tracking-wider uppercase transition-all text-rose-300 hover:text-rose-200 hover:bg-rose-500/10"
+                                  : subNavItemClass(`${module.id}_${sub.id}`)
+                              }
+                            >
+                              {isLogoutSub && <LogOut className="h-3 w-3" />}
+                              <span>{sub.name}</span>
+                            </button>
+                          );
+                        })}
                       </div>
                     )}
                   </div>

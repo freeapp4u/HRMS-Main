@@ -62,7 +62,7 @@ service firebase.storage {
 
     // Employee profile / HR vault documents
     match /documents/{allPaths=**} {
-      allow read: if isSignedIn();
+      allow read: if isStaff() || isAuditor();
       allow write: if isStaff() && isWithinSizeLimit();
     }
 

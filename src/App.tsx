@@ -1,6 +1,6 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useMemo } from "react";
 import { 
-  loadState, saveState, logActivity, AppState 
+  loadState, saveState, logActivity, clearSensitiveWorkspaceStorage, scopeAppStateForEmployee, AppState 
 } from "./dbStore";
 import {
   syncRecordToFirestore,
@@ -8,7 +8,7 @@ import {
   syncBatchRecordsToFirestore,
   hydrateWorkspaceFromFirestore
 } from "./firebaseSync";
-import { collection, onSnapshot, doc, getDoc, getDocs, query, where } from "firebase/firestore";
+import { collection, onSnapshot, doc, getDoc, getDocs, query, where, updateDoc } from "firebase/firestore";
 import type { MultiFactorResolver } from "firebase/auth";
 import { 
   auth,
@@ -21,6 +21,9 @@ import {
   onAuthStateChanged,
   getMultiFactorResolver,
   TotpMultiFactorGenerator,
+  EmailAuthProvider,
+  reauthenticateWithCredential,
+  updatePassword,
   handleFirestoreError,
   getFirebaseErrorMessage,
   subscribeFirestoreErrorNotices,
@@ -34,7 +37,8 @@ import {
   FamilyMember, MedicalExpense,
   SalaryComponent, TaxConfiguration, PayrollPeriod, EmployeeSalaryStructure,
   PayrollRecord, Payslip, PayslipDistributionLog, PayrollApproval, PayrollImportLog, PayrollSettings,
-  EmailActivityLog, SystemRole, RolePermissions
+  EmailActivityLog, SystemRole, RolePermissions,
+  HRRequest, EmployeeNotification, DriveAssociation
 } from "./types";
 import {
   DEFAULT_ROLES,
@@ -42,9 +46,11 @@ import {
   hasPermission,
   normalizeRolePermissions,
   enforceAdminSafeguard,
-  getEffectiveRolePermissions
+  resolveUserPermissions,
+  assertEmployeeRecordAccess,
+  UNAUTHORIZED_EMPLOYEE_RECORD_MSG
 } from "./utils/rbacUtils";
-import { APP_MODULES } from "./config/permissions";
+import { APP_MODULES, EMPLOYEE_BLOCKED_ADMIN_MODULES, EMPLOYEE_ESS_MODULE_ORDER } from "./config/permissions";
 
 // Component Imports
 import ThemeStyles from "./components/ThemeStyles";
@@ -61,8 +67,24 @@ import Settings from "./components/Settings";
 import Reports from "./components/Reports";
 import HelpCenter from "./components/HelpCenter";
 import DocumentVault from "./components/DocumentVault";
+import MyProfileView from "./components/ess/MyProfileView";
+import MyAttendanceView from "./components/ess/MyAttendanceView";
+import MyLeaveView from "./components/ess/MyLeaveView";
+import MyPayrollView from "./components/ess/MyPayrollView";
+import MyDocumentsView from "./components/ess/MyDocumentsView";
+import HRRequestsModule from "./components/ess/HRRequestsModule";
+import NotificationsView from "./components/ess/NotificationsView";
+import MyAccountView from "./components/ess/MyAccountView";
 
 import { ShieldCheck, Lock, Mail, ServerCrash, Key, Eye, EyeOff, X, Users, CheckCircle2, AlertCircle } from "lucide-react";
+import { useToast } from "./components/ui/ToastProvider";
+import { FormFieldError, ValidationSummary, fieldInputClass } from "./components/ui/FormFeedback";
+import {
+  validateLoginForm,
+  validateRegisterForm,
+  validateForgotPasswordForm,
+  focusFirstInvalidField,
+} from "./utils/validation";
 
 const AUTHORIZED_ADMIN_EXCEPTIONS = [
   "contactesfaye@gmail.com",
@@ -110,16 +132,30 @@ export default function App() {
   const [payrollApprovals, setPayrollApprovals] = useState<PayrollApproval[]>([]);
   const [payrollImportLogs, setPayrollImportLogs] = useState<PayrollImportLog[]>([]);
   const [payrollSettings, setPayrollSettings] = useState<PayrollSettings | null>(null);
+  const [hrRequests, setHrRequests] = useState<HRRequest[]>([]);
+  const [notifications, setNotifications] = useState<EmployeeNotification[]>([]);
+  const [driveAssociations, setDriveAssociations] = useState<DriveAssociation[]>([]);
+
+  const parseLocationRoute = () => {
+    const rawHash = window.location.hash.replace(/^#/, "");
+    const [hashTab, hashQuery] = rawHash.split("?");
+    const searchParams = new URLSearchParams(window.location.search);
+    const hashParams = new URLSearchParams(hashQuery || "");
+    const empParam = hashParams.get("employeeId") || searchParams.get("employeeId") || undefined;
+    return { tabId: hashTab || "dashboard", empId: empParam };
+  };
 
   // Layout UI states
-  const [activeTab, setActiveTabState] = useState(() => {
-    const hash = window.location.hash.replace("#", "");
-    return hash || "dashboard";
-  });
+  const [activeTab, setActiveTabState] = useState(() => parseLocationRoute().tabId);
+  const [requestedEmployeeId, setRequestedEmployeeId] = useState<string | undefined>(() => parseLocationRoute().empId);
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
   const setActiveTab = (tabId: string) => {
-    setActiveTabState(tabId);
+    const [cleanTab, queryStr] = tabId.split("?");
+    const tabParams = new URLSearchParams(queryStr || "");
+    const empParam = tabParams.get("employeeId") || undefined;
+    setActiveTabState(cleanTab || "dashboard");
+    setRequestedEmployeeId(empParam);
     if (window.location.hash !== `#${tabId}`) {
       window.location.hash = tabId;
     }
@@ -127,14 +163,21 @@ export default function App() {
 
   useEffect(() => {
     const handleHashChange = () => {
-      const hash = window.location.hash.replace("#", "");
-      if (hash && hash !== activeTab) {
-        setActiveTabState(hash);
+      const { tabId, empId } = parseLocationRoute();
+      if (tabId !== activeTab) {
+        setActiveTabState(tabId);
       }
+      setRequestedEmployeeId(empId);
     };
     window.addEventListener("hashchange", handleHashChange);
-    return () => window.removeEventListener("hashchange", handleHashChange);
+    window.addEventListener("popstate", handleHashChange);
+    return () => {
+      window.removeEventListener("hashchange", handleHashChange);
+      window.removeEventListener("popstate", handleHashChange);
+    };
   }, [activeTab]);
+
+  const { showError, showSuccess, showWarning } = useToast();
 
   // Login form states
   const [loginEmail, setLoginEmail] = useState("");
@@ -143,6 +186,7 @@ export default function App() {
   const [rememberMe, setRememberMe] = useState(true);
   const [loginLoading, setLoginLoading] = useState(false);
   const [loginError, setLoginError] = useState("");
+  const [loginFieldErrors, setLoginFieldErrors] = useState<Record<string, string>>({});
 
   // Unverified login helper states
   const [unverifiedUserEmail, setUnverifiedUserEmail] = useState("");
@@ -154,6 +198,7 @@ export default function App() {
   const [forgotPasswordModal, setForgotPasswordModal] = useState(false);
   const [resetEmail, setResetEmail] = useState("");
   const [resetStatus, setResetStatus] = useState<{ type: "success" | "error"; msg: string } | null>(null);
+  const [resetFieldErrors, setResetFieldErrors] = useState<Record<string, string>>({});
   const [resetLoading, setResetLoading] = useState(false);
 
   // Login / Register view toggle state
@@ -166,6 +211,7 @@ export default function App() {
   const [regConfirmPassword, setRegConfirmPassword] = useState("");
   const [showRegPassword, setShowRegPassword] = useState(false);
   const [regLoading, setRegLoading] = useState(false);
+  const [regFieldErrors, setRegFieldErrors] = useState<Record<string, string>>({});
   const [regCompleted, setRegCompleted] = useState(false);
   const [regCompletedEmail, setRegCompletedEmail] = useState("");
   const isRegisteringRef = useRef(false);
@@ -182,14 +228,19 @@ export default function App() {
 
   // Load state from local storage on mount
   useEffect(() => {
-    const state = loadState();
+    const rawState = loadState();
     
     // Dynamically apply High Density branding theme on first mount
-    if (state.config && state.config.branding && state.config.branding.primaryColor === "#0F2942") {
-      state.config.branding.primaryColor = "#002B5B";
-      state.config.branding.secondaryColor = "#001F44";
-      saveState({ config: state.config });
+    if (rawState.config && rawState.config.branding && rawState.config.branding.primaryColor === "#0F2942") {
+      rawState.config.branding.primaryColor = "#002B5B";
+      rawState.config.branding.secondaryColor = "#001F44";
+      saveState({ config: rawState.config });
     }
+
+    const state =
+      rawState.currentUser?.role === "Employee"
+        ? scopeAppStateForEmployee(rawState, rawState.currentUser.employeeId, rawState.currentUser)
+        : rawState;
 
     setUsers(state.users);
     setDepartments(state.departments);
@@ -216,7 +267,10 @@ export default function App() {
     setPayrollImportLogs(state.payrollImportLogs || []);
     setPayrollSettings(state.payrollSettings || null);
     setRoles(state.roles || []);
-    setRolePermissions(state.rolePermissions || []);
+    setRolePermissions((state.rolePermissions || []).map(p => enforceAdminSafeguard(normalizeRolePermissions(p))));
+    setHrRequests(state.hrRequests || []);
+    setNotifications(state.notifications || []);
+    setDriveAssociations(state.driveAssociations || []);
 
     setLoading(false);
   }, []);
@@ -248,16 +302,43 @@ export default function App() {
     if (hydrated.rolePermissions) {
       setRolePermissions(hydrated.rolePermissions.map(p => enforceAdminSafeguard(normalizeRolePermissions(p))));
     }
+    if (hydrated.hrRequests) setHrRequests(hydrated.hrRequests);
+    if (hydrated.notifications) setNotifications(hydrated.notifications);
+    if (hydrated.driveAssociations) setDriveAssociations(hydrated.driveAssociations);
     saveState(hydrated);
   };
 
   useEffect(() => {
+    const criticalCodes = new Set([
+      "permission-denied",
+      "unavailable",
+      "deadline-exceeded",
+      "already-exists",
+      "not-found",
+      "failed-precondition",
+      "resource-exhausted",
+      "unauthenticated",
+      "aborted",
+    ]);
     return subscribeFirestoreErrorNotices((info) => {
-      if (info.code === "permission-denied" || info.code === "unavailable") {
+      if (!info.code || criticalCodes.has(info.code)) {
+        const isWriteOrDelete =
+          info.operationType === OperationType.WRITE ||
+          info.operationType === OperationType.CREATE ||
+          info.operationType === OperationType.UPDATE ||
+          info.operationType === OperationType.DELETE;
         setFirebaseNotice(info);
+        if (isWriteOrDelete) {
+          showError(
+            getFirebaseErrorMessage({ code: info.code, message: info.error }, info.error, currentUser?.role),
+            info.code === "permission-denied" ? "Access Denied" : "Database Sync Error"
+          );
+        } else if (info.code === "unavailable") {
+          showWarning("Cloud database is currently unreachable. Changes are buffered locally.", "Offline Notice");
+        }
       }
     });
-  }, []);
+  }, [currentUser?.role, showError, showWarning]);
 
   // Enforce Firebase Auth state verification on startup and auth changes
   useEffect(() => {
@@ -298,15 +379,15 @@ export default function App() {
       setRolePermissions(initialPerms);
       saveState({ roles: initialRoles, rolePermissions: initialPerms });
 
-      // Sync to cloud if authenticated
-      if (auth.currentUser) {
+      // Sync default roles/permissions only if Administrator session is active
+      if (auth.currentUser && currentUser?.role === "Administrator") {
         initialRoles.forEach(r => syncRecordToFirestore("roles", r.id, r));
         initialPerms.forEach(p => syncRecordToFirestore("role_permissions", p.id, p));
       }
     }
-  }, [loading, roles.length]);
+  }, [loading, roles.length, currentUser?.role]);
 
-  // Dynamic RBAC Real-Time Firestore Listeners (roles, role_permissions, and current user)
+  // Dynamic RBAC & ESS Real-Time Firestore Listeners
   useEffect(() => {
     if (loading || !currentUser || !auth.currentUser?.emailVerified) return;
 
@@ -360,7 +441,8 @@ export default function App() {
         if (
           remoteUser.role !== currentUser.role ||
           remoteUser.status !== currentUser.status ||
-          remoteUser.employeeId !== currentUser.employeeId
+          remoteUser.employeeId !== currentUser.employeeId ||
+          JSON.stringify(remoteUser.permissionOverrides || {}) !== JSON.stringify(currentUser.permissionOverrides || {})
         ) {
           const updated = { ...currentUser, ...remoteUser };
           setCurrentUser(updated);
@@ -370,12 +452,91 @@ export default function App() {
       (err) => handleFirestoreError(err, OperationType.GET, `users/${cleanUserId}`)
     );
 
+    const isEmployee = currentUser.role === "Employee";
+    const empId = currentUser.employeeId;
+
+    // Scoped HR Requests listener
+    const hrReqQuery = isEmployee
+      ? query(collection(db, "hr_requests"), where("employeeId", "==", empId || "__NONE__"))
+      : collection(db, "hr_requests");
+    const unsubHRRequests = onSnapshot(
+      hrReqQuery,
+      (snapshot) => {
+        const items = snapshot.docs.map(d => d.data() as HRRequest);
+        setHrRequests(items);
+        saveState({ hrRequests: items });
+      },
+      (err) => handleFirestoreError(err, OperationType.LIST, "hr_requests")
+    );
+
+    // Scoped Notifications listener (announcements + personal)
+    const unsubAnnouncements = onSnapshot(
+      query(collection(db, "notifications"), where("category", "==", "announcement")),
+      (snapshot) => {
+        const anns = snapshot.docs.map(d => d.data() as EmployeeNotification);
+        setNotifications(prev => {
+          const map = new Map<string, EmployeeNotification>();
+          prev.filter(n => n.category !== "announcement").forEach(n => map.set(n.id, n));
+          anns.forEach(a => map.set(a.id, a));
+          const merged = Array.from(map.values()).sort((a, b) => (b.createdDate || "").localeCompare(a.createdDate || ""));
+          saveState({ notifications: merged });
+          return merged;
+        });
+      },
+      (err) => handleFirestoreError(err, OperationType.LIST, "notifications")
+    );
+
+    const personalNotifQuery =
+      currentUser.role === "Administrator" || currentUser.role === "HR Officer" || currentUser.role === "Auditor"
+        ? collection(db, "notifications")
+        : query(collection(db, "notifications"), where("recipientEmployeeId", "==", empId || "__NONE__"));
+    const unsubPersonalNotifs = onSnapshot(
+      personalNotifQuery,
+      (snapshot) => {
+        const items = snapshot.docs.map(d => d.data() as EmployeeNotification);
+        setNotifications(prev => {
+          const map = new Map<string, EmployeeNotification>();
+          prev.filter(n => n.category === "announcement").forEach(n => map.set(n.id, n));
+          items.forEach(n => map.set(n.id, n));
+          const merged = Array.from(map.values()).sort((a, b) => (b.createdDate || "").localeCompare(a.createdDate || ""));
+          saveState({ notifications: merged });
+          return merged;
+        });
+      },
+      (err) => handleFirestoreError(err, OperationType.LIST, "notifications")
+    );
+
+    // Scoped Drive Associations listener
+    const driveAssocQuery = isEmployee
+      ? query(
+          collection(db, "drive_associations"),
+          where("targetType", "==", "Employee"),
+          where("targetId", "==", empId || "__NONE__")
+        )
+      : collection(db, "drive_associations");
+    const unsubDriveAssocs = onSnapshot(
+      driveAssocQuery,
+      (snapshot) => {
+        let items = snapshot.docs.map(d => d.data() as DriveAssociation);
+        if (isEmployee) {
+          items = items.filter(d => d.targetType === "Employee" && empId && d.targetId === empId);
+        }
+        setDriveAssociations(items);
+        saveState({ driveAssociations: items });
+      },
+      (err) => handleFirestoreError(err, OperationType.LIST, "drive_associations")
+    );
+
     return () => {
       unsubRoles();
       unsubPerms();
       unsubUser();
+      unsubHRRequests();
+      unsubAnnouncements();
+      unsubPersonalNotifs();
+      unsubDriveAssocs();
     };
-  }, [loading, currentUser?.id]);
+  }, [loading, currentUser?.id, currentUser?.role, currentUser?.employeeId]);
 
   if (loading || !config) {
     return (
@@ -451,7 +612,7 @@ export default function App() {
   };
 
   const currentRoleObj = roles.find(r => r.id === currentUser?.role || r.name === currentUser?.role);
-  const currentRolePermissions = getEffectiveRolePermissions(roles, rolePermissions, currentUser?.role);
+  const currentRolePermissions = resolveUserPermissions(currentUser, roles, rolePermissions);
 
   const handleUpdateRoles = (newRoles: SystemRole[], deletedRoleId?: string) => {
     setRoles(newRoles);
@@ -614,7 +775,13 @@ export default function App() {
       payrollSettings: payrollSettings || undefined,
       roles,
       rolePermissions,
+      hrRequests,
+      notifications,
+      driveAssociations,
     };
+    if (currentUser?.role === "Employee") {
+      return;
+    }
     const updatedLogs = logActivity(currentState, module, action, record, details);
     setLogs(updatedLogs);
   };
@@ -690,7 +857,7 @@ export default function App() {
       id: refreshedUser.uid,
       fullName: refreshedUser.displayName || emailNorm.split("@")[0],
       email: emailNorm,
-      password: rawPassword,
+      password: "",
       role: targetRole,
       employeeId: linkedEmployeeId,
       status: "Active",
@@ -699,53 +866,111 @@ export default function App() {
       lastLogin: nowStamp
     };
 
-    const updatedUsers = users.some(u => u.email.toLowerCase() === emailNorm)
-      ? users.map(u => u.email.toLowerCase() === emailNorm ? userToLogin : u)
-      : [...users, userToLogin];
+    const updatedUsers = targetRole === "Employee"
+      ? [userToLogin]
+      : users.some(u => u.email.toLowerCase() === emailNorm)
+        ? users.map(u => u.email.toLowerCase() === emailNorm ? userToLogin : u)
+        : [...users, userToLogin];
 
     setUsers(updatedUsers);
     saveState({ users: updatedUsers });
-    await syncRecordToFirestore("users", userToLogin.id, userToLogin);
+
+    if (remoteUserDoc && targetRole !== "Administrator") {
+      try {
+        await updateDoc(doc(db, "users", refreshedUser.uid), {
+          lastLogin: nowStamp,
+          emailVerified: true,
+        });
+      } catch (uErr) {
+        handleFirestoreError(uErr, OperationType.UPDATE, `users/${refreshedUser.uid}`);
+      }
+    } else {
+      const sanitizedUserPayload = { ...userToLogin, password: "" };
+      await syncRecordToFirestore("users", userToLogin.id, sanitizedUserPayload);
+    }
     handleUpdateCurrentUser(userToLogin);
 
     // Hydrate authorized collections from Cloud Firestore
     setCloudHydrating(true);
     try {
       const hydrated = await hydrateWorkspaceFromFirestore(userToLogin);
-      applyHydratedState(hydrated);
+      if (targetRole === "Employee") {
+        const mergedLocal: AppState = {
+          users: [userToLogin],
+          departments: hydrated.departments || departments,
+          employees: hydrated.employees || employees,
+          holidays: hydrated.holidays || holidays,
+          attendance: hydrated.attendance || attendance,
+          leaves: hydrated.leaves || leaves,
+          familyMembers: hydrated.familyMembers || familyMembers,
+          medicalExpenses: hydrated.medicalExpenses || medicalExpenses,
+          config: hydrated.config || config!,
+          logs: [],
+          currentUser: userToLogin,
+          emailLogs: [],
+          salaryComponents: hydrated.salaryComponents || salaryComponents,
+          taxConfig: (hydrated.taxConfig || taxConfig)!,
+          payrollPeriods: hydrated.payrollPeriods || payrollPeriods,
+          salaryStructures: hydrated.salaryStructures || salaryStructures,
+          payrollRecords: hydrated.payrollRecords || payrollRecords,
+          payslips: hydrated.payslips || payslips,
+          payslipDistributionLogs: [],
+          payrollApprovals: [],
+          payrollImportLogs: [],
+          payrollSettings: (hydrated.payrollSettings || payrollSettings)!,
+          roles: hydrated.roles || roles,
+          rolePermissions: hydrated.rolePermissions || rolePermissions,
+          hrRequests: hydrated.hrRequests || hrRequests,
+          notifications: hydrated.notifications || notifications,
+          driveAssociations: hydrated.driveAssociations || driveAssociations,
+        };
+        const scoped = scopeAppStateForEmployee(mergedLocal, linkedEmployeeId, userToLogin);
+        applyHydratedState(scoped);
+        const currentParse = parseTabPermission(activeTab);
+        if (EMPLOYEE_BLOCKED_ADMIN_MODULES.has(currentParse.moduleId)) {
+          setActiveTab("dashboard");
+        }
+      } else {
+        applyHydratedState(hydrated);
+      }
       await verifyFirebaseConnection();
     } finally {
       setCloudHydrating(false);
     }
 
-    const currentState: AppState = {
-      users: updatedUsers,
-      departments,
-      employees,
-      holidays,
-      attendance,
-      leaves,
-      familyMembers,
-      medicalExpenses,
-      config: config!,
-      logs,
-      currentUser: userToLogin,
-      emailLogs,
-      salaryComponents,
-      taxConfig: taxConfig || undefined,
-      payrollPeriods,
-      salaryStructures,
-      payrollRecords,
-      payslips,
-      payslipDistributionLogs,
-      payrollApprovals,
-      payrollImportLogs,
-      payrollSettings: payrollSettings || undefined,
-      roles,
-      rolePermissions,
-    };
-    const updatedLogs = logActivity(currentState, "Security", "Operator Login", emailNorm, `Operator logged in from portal IP (${targetRole})`);
-    setLogs(updatedLogs);
+    if (targetRole !== "Employee") {
+      const currentState: AppState = {
+        users: updatedUsers,
+        departments,
+        employees,
+        holidays,
+        attendance,
+        leaves,
+        familyMembers,
+        medicalExpenses,
+        config: config!,
+        logs,
+        currentUser: userToLogin,
+        emailLogs,
+        salaryComponents,
+        taxConfig: taxConfig || undefined,
+        payrollPeriods,
+        salaryStructures,
+        payrollRecords,
+        payslips,
+        payslipDistributionLogs,
+        payrollApprovals,
+        payrollImportLogs,
+        payrollSettings: payrollSettings || undefined,
+        roles,
+        rolePermissions,
+        hrRequests,
+        notifications,
+        driveAssociations,
+      };
+      const updatedLogs = logActivity(currentState, "Security", "Operator Login", emailNorm, `Operator logged in from portal IP (${targetRole})`);
+      setLogs(updatedLogs);
+    }
 
     setLoginEmail("");
     setLoginPassword("");
@@ -763,19 +988,17 @@ export default function App() {
     e.preventDefault();
     setLoginError("");
     setResendSuccessMsg("");
+    setLoginFieldErrors({});
 
-    if (!loginEmail.trim() || !loginPassword) {
-      setLoginError("Please enter both your company email address and password.");
+    const check = validateLoginForm(loginEmail, loginPassword);
+    if (!check.valid) {
+      setLoginFieldErrors(check.errors);
+      setLoginError(check.summaryMessage || "Please correct the highlighted fields.");
+      focusFirstInvalidField(check.errors);
       return;
     }
 
     const emailNorm = loginEmail.trim().toLowerCase();
-
-    // 1. Email allowlist check (@ethiopianre.com or authorized admin exception emails)
-    if (!isAuthorizedEmail(emailNorm)) {
-      setLoginError("Access is restricted to official Ethiopian Reinsurance email addresses (@ethiopianre.com) or authorized system administrators.");
-      return;
-    }
 
     setLoginLoading(true);
 
@@ -833,7 +1056,12 @@ export default function App() {
   // Multi-Factor Authentication (MFA) Challenge Completion
   const handleMfaVerifySubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!mfaResolver || !mfaCode.trim()) return;
+    if (!mfaResolver) return;
+    if (!mfaCode.trim() || mfaCode.trim().length < 6) {
+      setMfaError("Please enter the 6-digit verification code from your authenticator app.");
+      focusFirstInvalidField({ mfaCode: "Invalid code" });
+      return;
+    }
     setMfaError("");
     setMfaLoading(true);
     try {
@@ -894,19 +1122,20 @@ export default function App() {
   const handlePasswordResetSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setResetStatus(null);
-    if (!resetEmail.trim()) {
-      setResetStatus({ type: "error", msg: "Please enter your registered company email address." });
+    setResetFieldErrors({});
+    const check = validateForgotPasswordForm(resetEmail);
+    if (!check.valid) {
+      setResetFieldErrors(check.errors);
+      setResetStatus({ type: "error", msg: check.errors.resetEmail || "Please enter a valid email address." });
+      focusFirstInvalidField(check.errors);
       return;
     }
     const norm = resetEmail.trim().toLowerCase();
-    if (!isAuthorizedEmail(norm)) {
-      setResetStatus({ type: "error", msg: "Password reset is restricted to registered @ethiopianre.com accounts or authorized system administrators." });
-      return;
-    }
     setResetLoading(true);
     try {
       await sendPasswordResetEmail(auth, norm);
       setResetStatus({ type: "success", msg: `Password reset instructions dispatched to ${norm}. Check your email inbox.` });
+      showSuccess(`Password reset email sent to ${norm}.`);
     } catch (fErr: any) {
       console.warn("Firebase Password Reset notice:", fErr);
       if (fErr?.code === "auth/user-not-found") {
@@ -923,33 +1152,29 @@ export default function App() {
   const handleRegisterSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoginError("");
+    setRegFieldErrors({});
 
-    if (!regFullName.trim() || !regEmail.trim() || !regPassword || !regConfirmPassword) {
-      setLoginError("Please fill out all registration fields.");
+    const check = validateRegisterForm({
+      fullName: regFullName,
+      email: regEmail,
+      password: regPassword,
+      confirmPassword: regConfirmPassword,
+      existingUsers: users,
+    });
+    if (!check.valid) {
+      setRegFieldErrors(check.errors);
+      if (check.errors.regEmail?.includes("already registered")) {
+        setLoginError("EMAIL_ALREADY_IN_USE");
+      } else {
+        setLoginError(check.summaryMessage || "Please correct the highlighted registration fields.");
+      }
+      focusFirstInvalidField(check.errors);
       return;
     }
 
     const emailNorm = regEmail.trim().toLowerCase();
 
-    // 1. Password matches validation
-    if (regPassword !== regConfirmPassword) {
-      setLoginError("Password confirmation failed: Passwords do not match.");
-      return;
-    }
-
-    // 2. Validate email allowlist BEFORE creating Firebase Auth account
-    if (!isAuthorizedEmail(emailNorm)) {
-      setLoginError("Registration is restricted to official Ethiopian Reinsurance email addresses (@ethiopianre.com).");
-      return;
-    }
-
-    // 3. Prevent duplicate emails
-    if (users.some(u => u.email.toLowerCase() === emailNorm)) {
-      setLoginError("EMAIL_ALREADY_IN_USE");
-      return;
-    }
-
-    // 4. Automatic Role Assignment: "Administrator" for authorized exception emails, default "Employee" for newly registered users
+    // Automatic Role Assignment: "Administrator" for authorized exception emails, default "Employee" for newly registered users
     const assignedRole: UserRole = isAuthorizedAdminException(emailNorm) ? "Administrator" : "Employee";
     const matchingEmployee = employees.find(e => e.email.trim().toLowerCase() === emailNorm);
 
@@ -969,7 +1194,7 @@ export default function App() {
         id: userCred.user.uid,
         fullName: regFullName.trim(),
         email: emailNorm,
-        password: regPassword,
+        password: "",
         role: assignedRole,
         employeeId: matchingEmployee?.employeeId,
         status: "Pending Verification",
@@ -1006,10 +1231,25 @@ export default function App() {
   };
 
   const handleLogout = () => {
-    if (currentUser) {
+    if (currentUser && currentUser.role !== "Employee") {
       handleLogAction("Security", "Operator Logout", currentUser.email, `Operator closed portal session`);
     }
     signOut(auth).catch(err => console.warn("Firebase signOut notice:", err));
+    clearSensitiveWorkspaceStorage();
+    setUsers([]);
+    setEmployees([]);
+    setAttendance([]);
+    setLeaves([]);
+    setFamilyMembers([]);
+    setMedicalExpenses([]);
+    setSalaryStructures([]);
+    setPayrollRecords([]);
+    setPayslips([]);
+    setHrRequests([]);
+    setNotifications([]);
+    setDriveAssociations([]);
+    setLogs([]);
+    setEmailLogs([]);
     handleUpdateCurrentUser(null);
     setActiveTab("dashboard");
   };
@@ -1017,32 +1257,294 @@ export default function App() {
   // Profile management from within the Header Component
   const handleUpdateOwnProfile = (fullName: string, email: string): boolean => {
     if (!currentUser) return false;
-    const emailNorm = email.trim().toLowerCase();
-    const isDuplicate = users.some(u => u.id !== currentUser.id && u.email.toLowerCase() === emailNorm);
+    const targetEmail = currentUser.role === "Employee" ? currentUser.email : email.trim().toLowerCase();
+    const isDuplicate = users.some(u => u.id !== currentUser.id && u.email.toLowerCase() === targetEmail);
     if (isDuplicate) return false;
 
-    const updatedUser = { ...currentUser, fullName, email: emailNorm };
+    const updatedUser = { ...currentUser, fullName, email: targetEmail };
     const updatedUsers = users.map(u => u.id === currentUser.id ? updatedUser : u);
-    
-    handleUpdateUsers(updatedUsers, updatedUser);
+    setUsers(updatedUsers);
+    saveState({ users: updatedUsers });
     handleUpdateCurrentUser(updatedUser);
-    handleLogAction("Profile", "Self Profile Updated", emailNorm, "Operator modified their account profile metadata");
+
+    if (auth.currentUser) {
+      updateDoc(doc(db, "users", currentUser.id), { fullName }).catch(err =>
+        handleFirestoreError(err, OperationType.UPDATE, `users/${currentUser.id}`)
+      );
+    }
+    handleLogAction("Profile", "Self Profile Updated", targetEmail, "Operator modified their account profile metadata");
     return true;
   };
 
-  const handleUpdateOwnPassword = (oldPass: string, newPass: string): boolean => {
-    if (!currentUser) return false;
-    // Check old pass
-    const freshUser = users.find(u => u.id === currentUser.id);
-    if (!freshUser || freshUser.password !== oldPass) return false;
+  const handleUpdateOwnPassword = async (
+    oldPass: string,
+    newPass: string
+  ): Promise<{ ok: boolean; error?: string }> => {
+    if (!currentUser || !auth.currentUser || !auth.currentUser.email) {
+      return { ok: false, error: "Active Firebase Auth session not found. Please sign in again." };
+    }
+    try {
+      const credential = EmailAuthProvider.credential(auth.currentUser.email, oldPass);
+      await reauthenticateWithCredential(auth.currentUser, credential);
+      await updatePassword(auth.currentUser, newPass);
+      handleLogAction("Profile", "Self Password Changed", currentUser.email, "Operator updated security password");
+      return { ok: true };
+    } catch (err: any) {
+      const code = err?.code || "";
+      if (code === "auth/wrong-password" || code === "auth/invalid-credential") {
+        return { ok: false, error: "Current password is incorrect." };
+      }
+      if (code === "auth/weak-password") {
+        return { ok: false, error: "New password is too weak. Use at least 6 characters." };
+      }
+      if (code === "auth/requires-recent-login") {
+        return { ok: false, error: "Security session expired. Please sign out and sign in again to change password." };
+      }
+      return { ok: false, error: getFirebaseErrorMessage(err, "Failed to update password.") };
+    }
+  };
 
-    const updatedUser = { ...freshUser, password: newPass };
-    const updatedUsers = users.map(u => u.id === currentUser.id ? updatedUser : u);
-    
-    handleUpdateUsers(updatedUsers, updatedUser);
-    handleUpdateCurrentUser(updatedUser);
-    handleLogAction("Profile", "Self Password Changed", currentUser.email, "Operator changed security password");
+  // ESS & HR Request Workflow Handlers
+  const handleUpdateLeavesFromESS = async (updatedLeaves: LeaveRecord[], syncItem?: LeaveRecord) => {
+    handleUpdateLeaves(updatedLeaves);
+    if (syncItem) {
+      if (currentUser?.role === "Employee" && syncItem.status === "Cancelled") {
+        const cleanId = syncItem.id.replace(/[^a-zA-Z0-9_\-]/g, "_");
+        try {
+          await updateDoc(doc(db, "leaves", cleanId), {
+            status: "Cancelled",
+            updatedDate: syncItem.updatedDate || new Date().toISOString().replace("T", " ").substring(0, 19),
+          });
+        } catch (err) {
+          handleFirestoreError(err, OperationType.UPDATE, `leaves/${cleanId}`);
+        }
+      } else {
+        await syncRecordToFirestore("leaves", syncItem.id, syncItem);
+      }
+    }
+  };
+
+  const handleSubmitHRRequest = async (req: HRRequest): Promise<boolean> => {
+    if (!currentUser) return false;
+    const access = assertEmployeeRecordAccess(
+      currentUser,
+      currentRolePermissions,
+      "requests",
+      req.employeeId,
+      employees,
+      departments
+    );
+    if (!access.allowed) {
+      showError(access.message || UNAUTHORIZED_EMPLOYEE_RECORD_MSG);
+      return false;
+    }
+
+    const updated = [req, ...hrRequests];
+    setHrRequests(updated);
+    saveState({ hrRequests: updated });
+    const res = await syncRecordToFirestore("hr_requests", req.id, req);
+    if (!res.ok && res.code === "permission-denied") {
+      return false;
+    }
     return true;
+  };
+
+  const handleCancelHRRequest = async (req: HRRequest): Promise<boolean> => {
+    if (!currentUser) return false;
+    const access = assertEmployeeRecordAccess(
+      currentUser,
+      currentRolePermissions,
+      "requests",
+      req.employeeId,
+      employees,
+      departments
+    );
+    if (!access.allowed) {
+      showError(access.message || UNAUTHORIZED_EMPLOYEE_RECORD_MSG);
+      return false;
+    }
+    const nowStamp = new Date().toISOString().replace("T", " ").substring(0, 19);
+    const updatedReq: HRRequest = { ...req, status: "Cancelled", updatedDate: nowStamp };
+    const updated = hrRequests.map(r => (r.id === req.id ? updatedReq : r));
+    setHrRequests(updated);
+    saveState({ hrRequests: updated });
+
+    const cleanId = req.id.replace(/[^a-zA-Z0-9_\-]/g, "_");
+    if (currentUser.role === "Employee" && auth.currentUser) {
+      try {
+        await updateDoc(doc(db, "hr_requests", cleanId), {
+          status: "Cancelled",
+          updatedDate: nowStamp,
+        });
+        return true;
+      } catch (err) {
+        handleFirestoreError(err, OperationType.UPDATE, `hr_requests/${cleanId}`);
+        return false;
+      }
+    }
+    const res = await syncRecordToFirestore("hr_requests", req.id, updatedReq);
+    return res.ok || res.code !== "permission-denied";
+  };
+
+  const handleReviewHRRequest = async (
+    req: HRRequest,
+    decision: "Approved" | "Rejected",
+    comments: string
+  ): Promise<boolean> => {
+    if (!currentUser || currentUser.role === "Employee") {
+      showError(UNAUTHORIZED_EMPLOYEE_RECORD_MSG);
+      return false;
+    }
+    if (!hasPermission(currentRolePermissions, "requests", "approve")) {
+      showError("Your role does not have approval permission for HR requests.");
+      return false;
+    }
+
+    const nowStamp = new Date().toISOString().replace("T", " ").substring(0, 19);
+    const updatedReq: HRRequest = {
+      ...req,
+      status: decision,
+      reviewedBy: currentUser.email,
+      reviewedDate: nowStamp,
+      reviewComments: comments,
+      updatedDate: nowStamp,
+    };
+
+    const nextRequests = hrRequests.map(r => (r.id === req.id ? updatedReq : r));
+    setHrRequests(nextRequests);
+    saveState({ hrRequests: nextRequests });
+    await syncRecordToFirestore("hr_requests", req.id, updatedReq);
+
+    if (decision === "Approved") {
+      if (req.requestType === "profile_update" && req.proposedProfileChanges) {
+        const targetEmp = employees.find(e => e.employeeId === req.employeeId);
+        if (targetEmp) {
+          const updatedEmp: Employee = {
+            ...targetEmp,
+            phoneNumber: req.proposedProfileChanges.phoneNumber || targetEmp.phoneNumber,
+            altPhoneNumber:
+              req.proposedProfileChanges.altPhoneNumber !== undefined
+                ? req.proposedProfileChanges.altPhoneNumber
+                : targetEmp.altPhoneNumber,
+            address: req.proposedProfileChanges.address || targetEmp.address,
+            updatedDate: nowStamp,
+            updatedBy: currentUser.email,
+          };
+          handleUpdateEmployee(updatedEmp);
+        }
+      } else if (req.requestType === "attendance_correction" && req.attendanceCorrection) {
+        const ac = req.attendanceCorrection;
+        const existing = attendance.find(a => a.employeeId === req.employeeId && a.date === ac.date);
+        const calcHours = (inT: string, outT: string) => {
+          if (!inT || !outT) return 0;
+          const [ih, im] = inT.split(":").map(Number);
+          const [oh, om] = outT.split(":").map(Number);
+          return Math.max(0, parseFloat((((oh * 60 + om) - (ih * 60 + im)) / 60).toFixed(1)));
+        };
+        if (existing) {
+          const updatedAtt: AttendanceRecord = {
+            ...existing,
+            checkInTime: ac.requestedCheckIn || existing.checkInTime,
+            checkOutTime: ac.requestedCheckOut || existing.checkOutTime,
+            status: ac.requestedStatus || existing.status,
+            workingHours: calcHours(
+              ac.requestedCheckIn || existing.checkInTime,
+              ac.requestedCheckOut || existing.checkOutTime
+            ),
+            remarks: `${existing.remarks ? existing.remarks + " | " : ""}Approved correction (${req.id}): ${req.description}`,
+            updatedDate: nowStamp,
+          };
+          handleUpdateAttendanceRecord(updatedAtt);
+        } else {
+          const newAtt: AttendanceRecord = {
+            id: `ATT_${req.employeeId}_${ac.date.replace(/-/g, "")}`,
+            employeeId: req.employeeId,
+            date: ac.date,
+            checkInTime: ac.requestedCheckIn || "08:30",
+            checkOutTime: ac.requestedCheckOut || "17:00",
+            status: ac.requestedStatus || "Present",
+            workingHours: calcHours(ac.requestedCheckIn || "08:30", ac.requestedCheckOut || "17:00"),
+            lateStatus: ac.requestedStatus === "Late" ? "Yes" : "No",
+            remarks: `Approved correction (${req.id}): ${req.description}`,
+            recordedBy: currentUser.email,
+            createdDate: nowStamp,
+            updatedDate: nowStamp,
+          };
+          handleAddAttendance(newAtt);
+        }
+      }
+    }
+
+    // Dispatch automatic personal notification to the employee
+    const targetEmp = employees.find(e => e.employeeId === req.employeeId);
+    const notif: EmployeeNotification = {
+      id: `NOTIF_${Date.now()}`,
+      title: `HR Request ${decision}: ${req.subject}`,
+      message:
+        comments && comments.trim()
+          ? `Your HR request (${req.id}) was ${decision.toLowerCase()} by ${currentUser.fullName}. Note: ${comments}`
+          : `Your HR request (${req.id}) has been ${decision.toLowerCase()}.`,
+      category: "personal",
+      recipientEmployeeId: req.employeeId,
+      recipientEmail: targetEmp?.email,
+      isRead: false,
+      readByUserIds: [],
+      module: "requests",
+      relatedRecordId: req.id,
+      createdDate: nowStamp,
+      createdBy: currentUser.email,
+    };
+    const nextNotifs = [notif, ...notifications];
+    setNotifications(nextNotifs);
+    saveState({ notifications: nextNotifs });
+    await syncRecordToFirestore("notifications", notif.id, notif);
+    handleLogAction("HR Requests", `Request ${decision}`, req.id, `HR Request ${req.id} for ${req.employeeId} marked ${decision}`);
+    return true;
+  };
+
+  const handleMarkNotificationRead = async (notificationId: string) => {
+    if (!currentUser) return;
+    const target = notifications.find(n => n.id === notificationId);
+    if (!target) return;
+    const readSet = new Set(target.readByUserIds || []);
+    readSet.add(currentUser.id);
+    const nextReadBy = Array.from(readSet);
+    const nextIsRead = target.category === "personal" ? true : target.isRead;
+
+    const updated = notifications.map(n =>
+      n.id === notificationId ? { ...n, isRead: nextIsRead, readByUserIds: nextReadBy } : n
+    );
+    setNotifications(updated);
+    saveState({ notifications: updated });
+
+    const cleanId = notificationId.replace(/[^a-zA-Z0-9_\-]/g, "_");
+    if (auth.currentUser) {
+      try {
+        await updateDoc(
+          doc(db, "notifications", cleanId),
+          target.category === "personal"
+            ? { isRead: true, readByUserIds: nextReadBy }
+            : { readByUserIds: nextReadBy }
+        );
+      } catch (err) {
+        handleFirestoreError(err, OperationType.UPDATE, `notifications/${cleanId}`);
+      }
+    }
+  };
+
+  const handlePublishAnnouncement = async (announcement: EmployeeNotification): Promise<boolean> => {
+    if (!currentUser || currentUser.role === "Employee") return false;
+    const next = [announcement, ...notifications];
+    setNotifications(next);
+    saveState({ notifications: next });
+    const res = await syncRecordToFirestore("notifications", announcement.id, announcement);
+    handleLogAction("Notifications", "Announcement Published", announcement.id, announcement.title);
+    return res.ok || res.code !== "permission-denied";
+  };
+
+  const handleUpdateDriveAssociations = (assocs: DriveAssociation[]) => {
+    setDriveAssociations(assocs);
+    saveState({ driveAssociations: assocs });
   };
 
   // Quick Action triggers for CRUD from other subcomponents
@@ -1542,7 +2044,7 @@ export default function App() {
 
                   {loginMode === "login" ? (
                     /* --- LOGIN FORM --- */
-                    <form onSubmit={handleLoginSubmit} className="space-y-5">
+                    <form onSubmit={handleLoginSubmit} noValidate className="space-y-5">
                       {/* Email Address */}
                       <div className="space-y-1.5">
                         <label className="block text-xs font-extrabold text-slate-700 uppercase tracking-wider">
@@ -1551,14 +2053,23 @@ export default function App() {
                         <div className="relative">
                           <Mail className="absolute left-3.5 top-3 h-4 w-4 text-slate-400" />
                           <input
+                            data-field="loginEmail"
                             type="email"
                             placeholder="e.g. employee@ethiopianre.com"
                             value={loginEmail}
-                            onChange={(e) => setLoginEmail(e.target.value)}
-                            className="w-full pl-10 pr-4 py-2.5 border border-slate-300 rounded-xl text-xs bg-slate-50/50 focus:bg-white focus:ring-2 focus:ring-[#002B5B] focus:border-transparent text-slate-800 font-medium transition-all"
-                            required
+                            onChange={(e) => {
+                              setLoginEmail(e.target.value);
+                              if (loginFieldErrors.loginEmail) {
+                                setLoginFieldErrors((prev) => ({ ...prev, loginEmail: "" }));
+                              }
+                            }}
+                            className={fieldInputClass(
+                              Boolean(loginFieldErrors.loginEmail),
+                              "w-full pl-10 pr-4 py-2.5 border border-slate-300 rounded-xl text-xs bg-slate-50/50 focus:bg-white focus:ring-2 focus:ring-[#002B5B] focus:border-transparent text-slate-800 font-medium transition-all"
+                            )}
                           />
                         </div>
+                        <FormFieldError error={loginFieldErrors.loginEmail} />
                       </div>
 
                       {/* Password */}
@@ -1569,12 +2080,20 @@ export default function App() {
                         <div className="relative">
                           <Lock className="absolute left-3.5 top-3 h-4 w-4 text-slate-400" />
                           <input
+                            data-field="loginPassword"
                             type={showLoginPassword ? "text" : "password"}
                             placeholder="Enter password"
                             value={loginPassword}
-                            onChange={(e) => setLoginPassword(e.target.value)}
-                            className="w-full pl-10 pr-10 py-2.5 border border-slate-300 rounded-xl text-xs bg-slate-50/50 focus:bg-white focus:ring-2 focus:ring-[#002B5B] focus:border-transparent text-slate-800 font-medium transition-all"
-                            required
+                            onChange={(e) => {
+                              setLoginPassword(e.target.value);
+                              if (loginFieldErrors.loginPassword) {
+                                setLoginFieldErrors((prev) => ({ ...prev, loginPassword: "" }));
+                              }
+                            }}
+                            className={fieldInputClass(
+                              Boolean(loginFieldErrors.loginPassword),
+                              "w-full pl-10 pr-10 py-2.5 border border-slate-300 rounded-xl text-xs bg-slate-50/50 focus:bg-white focus:ring-2 focus:ring-[#002B5B] focus:border-transparent text-slate-800 font-medium transition-all"
+                            )}
                           />
                           <button
                             type="button"
@@ -1585,6 +2104,7 @@ export default function App() {
                             {showLoginPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                           </button>
                         </div>
+                        <FormFieldError error={loginFieldErrors.loginPassword} />
                       </div>
 
                       {/* Remember Me & Forgot Password Row */}
@@ -1604,6 +2124,7 @@ export default function App() {
                           onClick={() => {
                             setResetEmail(loginEmail);
                             setResetStatus(null);
+                            setResetFieldErrors({});
                             setForgotPasswordModal(true);
                           }}
                           className="text-xs font-extrabold text-[#002B5B] hover:underline cursor-pointer"
@@ -1634,6 +2155,7 @@ export default function App() {
                           type="button"
                           onClick={() => {
                             setLoginError("");
+                            setLoginFieldErrors({});
                             setResendSuccessMsg("");
                             setLoginMode("register");
                           }}
@@ -1645,41 +2167,67 @@ export default function App() {
                     </form>
                   ) : (
                     /* --- REGISTRATION FORM --- */
-                    <form onSubmit={handleRegisterSubmit} className="space-y-4">
+                    <form onSubmit={handleRegisterSubmit} noValidate className="space-y-4">
                       <div className="space-y-1">
                         <label className="block text-xs font-extrabold text-slate-700 uppercase tracking-wider">Full Name</label>
                         <input
+                          data-field="regFullName"
                           type="text"
                           placeholder="e.g. Almaz Bekele"
                           value={regFullName}
-                          onChange={(e) => setRegFullName(e.target.value)}
-                          className="w-full px-3.5 py-2.5 border border-slate-300 rounded-xl text-xs bg-slate-50/50 focus:bg-white focus:ring-2 focus:ring-[#002B5B] text-slate-800 font-medium"
-                          required
+                          onChange={(e) => {
+                            setRegFullName(e.target.value);
+                            if (regFieldErrors.regFullName) {
+                              setRegFieldErrors((prev) => ({ ...prev, regFullName: "" }));
+                            }
+                          }}
+                          className={fieldInputClass(
+                            Boolean(regFieldErrors.regFullName),
+                            "w-full px-3.5 py-2.5 border border-slate-300 rounded-xl text-xs bg-slate-50/50 focus:bg-white focus:ring-2 focus:ring-[#002B5B] text-slate-800 font-medium"
+                          )}
                         />
+                        <FormFieldError error={regFieldErrors.regFullName} />
                       </div>
 
                       <div className="space-y-1">
                         <label className="block text-xs font-extrabold text-slate-700 uppercase tracking-wider">Company Email Address</label>
                         <input
+                          data-field="regEmail"
                           type="email"
                           placeholder="e.g. almaz.bekele@ethiopianre.com"
                           value={regEmail}
-                          onChange={(e) => setRegEmail(e.target.value)}
-                          className="w-full px-3.5 py-2.5 border border-slate-300 rounded-xl text-xs bg-slate-50/50 focus:bg-white focus:ring-2 focus:ring-[#002B5B] text-slate-800 font-medium"
-                          required
+                          onChange={(e) => {
+                            setRegEmail(e.target.value);
+                            if (regFieldErrors.regEmail) {
+                              setRegFieldErrors((prev) => ({ ...prev, regEmail: "" }));
+                            }
+                          }}
+                          className={fieldInputClass(
+                            Boolean(regFieldErrors.regEmail),
+                            "w-full px-3.5 py-2.5 border border-slate-300 rounded-xl text-xs bg-slate-50/50 focus:bg-white focus:ring-2 focus:ring-[#002B5B] text-slate-800 font-medium"
+                          )}
                         />
+                        <FormFieldError error={regFieldErrors.regEmail} />
                       </div>
 
                       <div className="space-y-1">
                         <label className="block text-xs font-extrabold text-slate-700 uppercase tracking-wider">Password</label>
                         <div className="relative">
                           <input
+                            data-field="regPassword"
                             type={showRegPassword ? "text" : "password"}
-                            placeholder="Create secure password"
+                            placeholder="Create secure password (min. 6 characters)"
                             value={regPassword}
-                            onChange={(e) => setRegPassword(e.target.value)}
-                            className="w-full px-3.5 py-2.5 border border-slate-300 rounded-xl text-xs bg-slate-50/50 focus:bg-white focus:ring-2 focus:ring-[#002B5B] text-slate-800 font-medium"
-                            required
+                            onChange={(e) => {
+                              setRegPassword(e.target.value);
+                              if (regFieldErrors.regPassword) {
+                                setRegFieldErrors((prev) => ({ ...prev, regPassword: "" }));
+                              }
+                            }}
+                            className={fieldInputClass(
+                              Boolean(regFieldErrors.regPassword),
+                              "w-full px-3.5 py-2.5 border border-slate-300 rounded-xl text-xs bg-slate-50/50 focus:bg-white focus:ring-2 focus:ring-[#002B5B] text-slate-800 font-medium"
+                            )}
                           />
                           <button
                             type="button"
@@ -1689,18 +2237,28 @@ export default function App() {
                             {showRegPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                           </button>
                         </div>
+                        <FormFieldError error={regFieldErrors.regPassword} />
                       </div>
 
                       <div className="space-y-1">
                         <label className="block text-xs font-extrabold text-slate-700 uppercase tracking-wider">Confirm Password</label>
                         <input
+                          data-field="regConfirmPassword"
                           type="password"
                           placeholder="Re-type password"
                           value={regConfirmPassword}
-                          onChange={(e) => setRegConfirmPassword(e.target.value)}
-                          className="w-full px-3.5 py-2.5 border border-slate-300 rounded-xl text-xs bg-slate-50/50 focus:bg-white focus:ring-2 focus:ring-[#002B5B] text-slate-800 font-medium"
-                          required
+                          onChange={(e) => {
+                            setRegConfirmPassword(e.target.value);
+                            if (regFieldErrors.regConfirmPassword) {
+                              setRegFieldErrors((prev) => ({ ...prev, regConfirmPassword: "" }));
+                            }
+                          }}
+                          className={fieldInputClass(
+                            Boolean(regFieldErrors.regConfirmPassword),
+                            "w-full px-3.5 py-2.5 border border-slate-300 rounded-xl text-xs bg-slate-50/50 focus:bg-white focus:ring-2 focus:ring-[#002B5B] text-slate-800 font-medium"
+                          )}
                         />
+                        <FormFieldError error={regFieldErrors.regConfirmPassword} />
                       </div>
 
                       <button
@@ -1723,6 +2281,7 @@ export default function App() {
                           type="button"
                           onClick={() => {
                             setLoginError("");
+                            setRegFieldErrors({});
                             setResendSuccessMsg("");
                             setLoginMode("login");
                           }}
@@ -1750,7 +2309,7 @@ export default function App() {
                 </button>
               </div>
 
-              <form onSubmit={handlePasswordResetSubmit} className="p-6 space-y-4">
+              <form onSubmit={handlePasswordResetSubmit} noValidate className="p-6 space-y-4">
                 {resetStatus && (
                   <div className={`p-3.5 rounded-xl text-xs font-semibold ${
                     resetStatus.type === "success" ? "bg-emerald-50 text-emerald-800 border border-emerald-200" : "bg-rose-50 text-rose-800 border border-rose-200"
@@ -1768,14 +2327,21 @@ export default function App() {
                   <div className="relative">
                     <Mail className="absolute left-3.5 top-3 h-4 w-4 text-slate-400" />
                     <input
+                      data-field="resetEmail"
                       type="email"
                       placeholder="e.g. employee@ethiopianre.com"
                       value={resetEmail}
-                      onChange={(e) => setResetEmail(e.target.value)}
-                      className="w-full pl-10 pr-4 py-2.5 border border-slate-300 rounded-xl text-xs bg-slate-50/50 focus:bg-white focus:ring-2 focus:ring-[#002B5B] text-slate-800 font-medium"
-                      required
+                      onChange={(e) => {
+                        setResetEmail(e.target.value);
+                        if (resetFieldErrors.resetEmail) setResetFieldErrors({});
+                      }}
+                      className={fieldInputClass(
+                        Boolean(resetFieldErrors.resetEmail),
+                        "w-full pl-10 pr-4 py-2.5 border border-slate-300 rounded-xl text-xs bg-slate-50/50 focus:bg-white focus:ring-2 focus:ring-[#002B5B] text-slate-800 font-medium"
+                      )}
                     />
                   </div>
+                  <FormFieldError error={resetFieldErrors.resetEmail} />
                 </div>
 
                 <div className="flex justify-end gap-2 pt-3 border-t mt-4">
@@ -1824,7 +2390,7 @@ export default function App() {
                 </button>
               </div>
 
-              <form onSubmit={handleMfaVerifySubmit} className="p-6 space-y-4">
+              <form onSubmit={handleMfaVerifySubmit} noValidate className="p-6 space-y-4">
                 {mfaError && (
                   <div className="p-3 bg-rose-50 text-rose-800 border border-rose-200 rounded-xl text-xs font-semibold">
                     {mfaError}
@@ -1838,15 +2404,22 @@ export default function App() {
                 <div className="space-y-1">
                   <label className="block text-xs font-extrabold text-slate-700 uppercase tracking-wider">Authenticator Code</label>
                   <input
+                    data-field="mfaCode"
                     type="text"
                     inputMode="numeric"
                     maxLength={8}
                     placeholder="e.g. 123456"
                     value={mfaCode}
-                    onChange={(e) => setMfaCode(e.target.value)}
-                    className="w-full px-4 py-2.5 border border-slate-300 rounded-xl text-sm tracking-widest font-mono font-bold text-center bg-slate-50/50 focus:bg-white focus:ring-2 focus:ring-[#002B5B] text-slate-800"
-                    required
+                    onChange={(e) => {
+                      setMfaCode(e.target.value);
+                      if (mfaError) setMfaError("");
+                    }}
+                    className={fieldInputClass(
+                      Boolean(mfaError),
+                      "w-full px-4 py-2.5 border border-slate-300 rounded-xl text-sm tracking-widest font-mono font-bold text-center bg-slate-50/50 focus:bg-white focus:ring-2 focus:ring-[#002B5B] text-slate-800"
+                    )}
                   />
+                  <FormFieldError error={mfaError && mfaCode.trim().length < 6 ? mfaError : undefined} />
                 </div>
 
                 <div className="flex justify-end gap-2 pt-3 border-t mt-4">
@@ -1883,12 +2456,16 @@ export default function App() {
 
   // Dynamic Route Protection & First-Permitted Tab Resolution
   const parseTabPermission = (tabId: string): { moduleId: string; submenuId?: string } => {
-    if (tabId === "dashboard" || tabId === "departments" || tabId === "attendance" || tabId === "documents" || tabId === "help") {
+    if (tabId === "dashboard" || tabId === "departments" || tabId === "help") {
       return { moduleId: tabId };
     }
     if (tabId === "employees" || tabId.startsWith("employees_")) {
       const sub = tabId.startsWith("employees_") ? tabId.replace("employees_", "") : undefined;
       return { moduleId: "employees", submenuId: sub };
+    }
+    if (tabId === "attendance" || tabId.startsWith("attendance_")) {
+      const sub = tabId.startsWith("attendance_") ? tabId.replace("attendance_", "") : undefined;
+      return { moduleId: "attendance", submenuId: sub };
     }
     if (tabId === "leaves" || tabId.startsWith("leaves_")) {
       const sub = tabId.startsWith("leaves_") ? tabId.replace("leaves_", "") : undefined;
@@ -1903,6 +2480,22 @@ export default function App() {
       if (sub === "import") sub = "csv_import";
       if (sub === "export") sub = "csv_export";
       return { moduleId: "payroll", submenuId: sub };
+    }
+    if (tabId === "documents" || tabId.startsWith("documents_")) {
+      const sub = tabId.startsWith("documents_") ? tabId.replace("documents_", "") : undefined;
+      return { moduleId: "documents", submenuId: sub };
+    }
+    if (tabId === "requests" || tabId.startsWith("requests_")) {
+      const sub = tabId.startsWith("requests_") ? tabId.replace("requests_", "") : undefined;
+      return { moduleId: "requests", submenuId: sub };
+    }
+    if (tabId === "notifications" || tabId.startsWith("notifications_")) {
+      const sub = tabId.startsWith("notifications_") ? tabId.replace("notifications_", "") : undefined;
+      return { moduleId: "notifications", submenuId: sub };
+    }
+    if (tabId === "account" || tabId.startsWith("account_")) {
+      const sub = tabId.startsWith("account_") ? tabId.replace("account_", "") : undefined;
+      return { moduleId: "account", submenuId: sub };
     }
     if (tabId === "reports" || tabId.startsWith("reports_")) {
       const sub = tabId.startsWith("reports_") ? tabId.replace("reports_", "") : undefined;
@@ -1920,18 +2513,35 @@ export default function App() {
   const canAccessTab = (tabId: string): boolean => {
     if (currentRoleObj?.status === "Inactive") return false;
     const { moduleId, submenuId } = parseTabPermission(tabId);
+    if (currentUser.role === "Employee" && EMPLOYEE_BLOCKED_ADMIN_MODULES.has(moduleId)) {
+      return false;
+    }
     if (!hasPermission(currentRolePermissions, moduleId, "view")) return false;
     const modDef = APP_MODULES.find(m => m.id === moduleId);
-    if (modDef && modDef.submenus.length > 0) {
-      if (submenuId) {
-        return hasPermission(currentRolePermissions, moduleId, "view", submenuId);
+    if (modDef) {
+      const subs = currentUser.role === "Employee" && modDef.essSubmenus ? modDef.essSubmenus : modDef.submenus;
+      if (subs.length > 0) {
+        if (submenuId) {
+          return hasPermission(currentRolePermissions, moduleId, "view", submenuId);
+        }
+        return subs.some(s => hasPermission(currentRolePermissions, moduleId, "view", s.id));
       }
-      return modDef.submenus.some(s => hasPermission(currentRolePermissions, moduleId, "view", s.id));
     }
     return true;
   };
 
   const getFirstPermittedTab = (): string => {
+    if (currentUser.role === "Employee") {
+      for (const modId of EMPLOYEE_ESS_MODULE_ORDER) {
+        const mod = APP_MODULES.find(m => m.id === modId);
+        if (!mod || !hasPermission(currentRolePermissions, mod.id, "view")) continue;
+        const subs = mod.essSubmenus || mod.submenus;
+        if (subs.length === 0) return mod.id;
+        const firstSub = subs.find(s => hasPermission(currentRolePermissions, mod.id, "view", s.id));
+        if (firstSub) return `${mod.id}_${firstSub.id}`;
+      }
+      return "dashboard";
+    }
     for (const mod of APP_MODULES) {
       if (hasPermission(currentRolePermissions, mod.id, "view")) {
         if (mod.submenus.length === 0) return mod.id;
@@ -1942,7 +2552,30 @@ export default function App() {
     return "help";
   };
 
+  const isEmployeeMode = currentUser.role === "Employee";
   const isRouteAuthorized = canAccessTab(activeTab);
+  const parsedRoute = parseTabPermission(activeTab);
+  const recordAccessCheck =
+    requestedEmployeeId && parsedRoute.moduleId
+      ? assertEmployeeRecordAccess(
+          currentUser,
+          currentRolePermissions,
+          parsedRoute.moduleId,
+          requestedEmployeeId,
+          employees,
+          departments
+        )
+      : { allowed: true };
+
+  const unreadNotificationsCount = notifications.filter(n => {
+    const isTargeted =
+      n.category === "announcement" ||
+      (currentUser.employeeId && n.recipientEmployeeId === currentUser.employeeId) ||
+      n.recipientEmail?.toLowerCase() === currentUser.email.toLowerCase() ||
+      !isEmployeeMode;
+    if (!isTargeted) return false;
+    return !n.isRead && !(n.readByUserIds?.includes(currentUser.id));
+  }).length;
 
   // CORE APPLICATION WORKSPACE (Authenticated Operator view)
   return (
@@ -1955,6 +2588,11 @@ export default function App() {
         currentUser={currentUser}
         companyName={config.profile.displayName}
         logoUrl={config.profile.logoUrl}
+        notifications={notifications}
+        showHelpShortcut={!isEmployeeMode}
+        onMarkNotificationRead={handleMarkNotificationRead}
+        onOpenNotifications={() => setActiveTab("notifications_personal")}
+        onNavigateToProfile={() => setActiveTab("employees_personal_info")}
         onLogout={handleLogout}
         onOpenHelp={() => setActiveTab("help")}
         onToggleSidebar={() => setSidebarOpen(!sidebarOpen)}
@@ -1970,6 +2608,8 @@ export default function App() {
           currentUser={currentUser}
           rolePermissions={currentRolePermissions}
           activeTab={activeTab}
+          unreadNotificationsCount={unreadNotificationsCount}
+          onLogout={handleLogout}
           onTabChange={(tabId) => {
             // Direct mapping of settings subtabs from sidebar triggers
             if (["profile", "branding", "holidays", "users", "roles"].includes(tabId)) {
@@ -1998,9 +2638,13 @@ export default function App() {
               <div className="flex items-start gap-2">
                 <AlertCircle className="h-4 w-4 text-amber-600 shrink-0 mt-0.5" />
                 <div>
-                  <span className="font-extrabold">Firebase Sync Notice</span>
-                  {firebaseNotice.path && <span className="ml-1.5 font-mono text-[11px] text-amber-700">({firebaseNotice.path})</span>}
-                  <p className="text-[11px] font-medium mt-0.5">{firebaseNotice.error}</p>
+                  <span className="font-extrabold">Cloud Synchronization Notice</span>
+                  {currentUser.role === "Administrator" && firebaseNotice.path && (
+                    <span className="ml-1.5 font-mono text-[11px] text-amber-700">({firebaseNotice.path})</span>
+                  )}
+                  <p className="text-[11px] font-medium mt-0.5">
+                    {getFirebaseErrorMessage({ code: firebaseNotice.code, message: firebaseNotice.error }, firebaseNotice.error, currentUser.role)}
+                  </p>
                 </div>
               </div>
               <button
@@ -2013,7 +2657,25 @@ export default function App() {
               </button>
             </div>
           )}
-          {!isRouteAuthorized ? (
+          {!recordAccessCheck.allowed ? (
+            <div className="max-w-lg mx-auto mt-12 bg-white border border-rose-200 rounded-2xl p-8 text-center shadow-sm space-y-4">
+              <div className="mx-auto h-14 w-14 rounded-2xl bg-rose-50 border border-rose-200 flex items-center justify-center text-rose-600">
+                <Lock className="h-7 w-7" />
+              </div>
+              <div className="space-y-1.5">
+                <h2 className="text-base font-extrabold text-slate-800">Unauthorized Employee Record</h2>
+                <p className="text-xs font-semibold text-rose-700 leading-relaxed">
+                  {UNAUTHORIZED_EMPLOYEE_RECORD_MSG}
+                </p>
+              </div>
+              <button
+                onClick={() => setActiveTab(getFirstPermittedTab())}
+                className="px-4 py-2 bg-[#002B5B] hover:bg-[#001F44] text-white text-xs font-bold rounded-xl transition-colors"
+              >
+                Return to My Workspace
+              </button>
+            </div>
+          ) : !isRouteAuthorized ? (
             <div className="max-w-lg mx-auto mt-12 bg-white border border-rose-200 rounded-2xl p-8 text-center shadow-sm space-y-4">
               <div className="mx-auto h-14 w-14 rounded-2xl bg-rose-50 border border-rose-200 flex items-center justify-center text-rose-600">
                 <Lock className="h-7 w-7" />
@@ -2049,6 +2711,10 @@ export default function App() {
                   currentUser={currentUser}
                   role={currentUser.role}
                   rolePermissions={currentRolePermissions}
+                  payslips={payslips}
+                  hrRequests={hrRequests}
+                  notifications={notifications}
+                  companyConfig={config}
                   onNavigate={(tabId) => {
                     if (["profile", "branding", "holidays", "users", "roles"].includes(tabId)) {
                       setActiveTab("settings_" + tabId);
@@ -2071,24 +2737,41 @@ export default function App() {
               )}
 
               {(activeTab === "employees" || activeTab.startsWith("employees_")) && (
-                <Employees
-                  employees={employees}
-                  departments={departments}
-                  familyMembers={familyMembers}
-                  companyConfig={config}
-                  currentUser={currentUser}
-                  initialSubTab={activeTab.startsWith("employees_") ? activeTab.replace("employees_", "") : "directory"}
-                  permissions={currentRolePermissions?.modulePermissions.employees}
-                  onAddEmployee={handleAddEmployee}
-                  onAddEmployeesBulk={handleAddEmployeesBulk}
-                  onUpdateEmployee={handleUpdateEmployee}
-                  onDeleteEmployee={handleDeleteEmployee}
-                  onAddFamilyMember={handleAddFamilyMember}
-                  onLogAction={handleLogAction}
-                />
+                isEmployeeMode ? (
+                  <MyProfileView
+                    currentUser={currentUser}
+                    employees={employees}
+                    departments={departments}
+                    driveAssociations={driveAssociations}
+                    hrRequests={hrRequests}
+                    permissions={currentRolePermissions?.modulePermissions.employees}
+                    initialSubTab={activeTab.startsWith("employees_") ? activeTab.replace("employees_", "") : "personal_info"}
+                    requestedEmployeeId={requestedEmployeeId}
+                    onSubmitHRRequest={handleSubmitHRRequest}
+                    onNavigate={setActiveTab}
+                  />
+                ) : (
+                  <Employees
+                    employees={employees}
+                    departments={departments}
+                    familyMembers={familyMembers}
+                    companyConfig={config}
+                    currentUser={currentUser}
+                    initialSubTab={activeTab.startsWith("employees_") ? activeTab.replace("employees_", "") : "directory"}
+                    permissions={currentRolePermissions?.modulePermissions.employees}
+                    rolePermissions={currentRolePermissions}
+                    driveAssociations={driveAssociations}
+                    onAddEmployee={handleAddEmployee}
+                    onAddEmployeesBulk={handleAddEmployeesBulk}
+                    onUpdateEmployee={handleUpdateEmployee}
+                    onDeleteEmployee={handleDeleteEmployee}
+                    onAddFamilyMember={handleAddFamilyMember}
+                    onLogAction={handleLogAction}
+                  />
+                )
               )}
 
-              {activeTab === "departments" && (
+              {!isEmployeeMode && activeTab === "departments" && (
                 <Departments
                   departments={departments}
                   employees={employees}
@@ -2102,40 +2785,70 @@ export default function App() {
                 />
               )}
 
-              {activeTab === "attendance" && (
-                <Attendance
-                  attendance={attendance}
-                  employees={employees}
-                  departments={departments}
-                  companyConfig={config}
-                  currentUser={currentUser}
-                  permissions={currentRolePermissions?.modulePermissions.attendance}
-                  onAddAttendance={handleAddAttendance}
-                  onUpdateAttendance={handleUpdateAttendanceRecord}
-                  onDeleteAttendance={handleDeleteAttendanceRecord}
-                  onLogAction={handleLogAction}
-                />
+              {(activeTab === "attendance" || activeTab.startsWith("attendance_")) && (
+                isEmployeeMode ? (
+                  <MyAttendanceView
+                    currentUser={currentUser}
+                    employees={employees}
+                    departments={departments}
+                    attendance={attendance}
+                    hrRequests={hrRequests}
+                    companyConfig={config}
+                    permissions={currentRolePermissions?.modulePermissions.attendance}
+                    initialSubTab={activeTab.startsWith("attendance_") ? activeTab.replace("attendance_", "") : "daily"}
+                    requestedEmployeeId={requestedEmployeeId}
+                    onSubmitHRRequest={handleSubmitHRRequest}
+                  />
+                ) : (
+                  <Attendance
+                    attendance={attendance}
+                    employees={employees}
+                    departments={departments}
+                    companyConfig={config}
+                    currentUser={currentUser}
+                    permissions={currentRolePermissions?.modulePermissions.attendance}
+                    onAddAttendance={handleAddAttendance}
+                    onUpdateAttendance={handleUpdateAttendanceRecord}
+                    onDeleteAttendance={handleDeleteAttendanceRecord}
+                    onLogAction={handleLogAction}
+                  />
+                )
               )}
 
               {(activeTab === "leaves" || activeTab.startsWith("leaves_")) && (
-                <LeaveManagement
-                  leaves={leaves}
-                  employees={employees}
-                  departments={departments}
-                  holidays={holidays}
-                  companyConfig={config}
-                  currentUser={currentUser}
-                  initialSubTab={activeTab.includes("_") ? activeTab.split("_")[1] : "dashboard"}
-                  permissions={currentRolePermissions?.modulePermissions.leaves}
-                  onAddLeave={handleAddLeave}
-                  onUpdateLeave={handleUpdateLeaveRecord}
-                  onDeleteLeave={handleDeleteLeaveRecord}
-                  onUpdateConfig={handleUpdateConfig}
-                  onLogAction={handleLogAction}
-                />
+                isEmployeeMode ? (
+                  <MyLeaveView
+                    currentUser={currentUser}
+                    employees={employees}
+                    leaves={leaves}
+                    holidays={holidays}
+                    companyConfig={config}
+                    permissions={currentRolePermissions?.modulePermissions.leaves}
+                    initialSubTab={activeTab.includes("_") ? activeTab.substring(activeTab.indexOf("_") + 1) : "apply"}
+                    requestedEmployeeId={requestedEmployeeId}
+                    onUpdateLeaves={handleUpdateLeavesFromESS}
+                    onLogAction={handleLogAction}
+                  />
+                ) : (
+                  <LeaveManagement
+                    leaves={leaves}
+                    employees={employees}
+                    departments={departments}
+                    holidays={holidays}
+                    companyConfig={config}
+                    currentUser={currentUser}
+                    initialSubTab={activeTab.includes("_") ? activeTab.split("_")[1] : "dashboard"}
+                    permissions={currentRolePermissions?.modulePermissions.leaves}
+                    onAddLeave={handleAddLeave}
+                    onUpdateLeave={handleUpdateLeaveRecord}
+                    onDeleteLeave={handleDeleteLeaveRecord}
+                    onUpdateConfig={handleUpdateConfig}
+                    onLogAction={handleLogAction}
+                  />
+                )
               )}
 
-              {(activeTab === "medical" || activeTab.startsWith("medical_")) && (
+              {!isEmployeeMode && (activeTab === "medical" || activeTab.startsWith("medical_")) && (
                 <MedicalManagement
                   employees={employees}
                   departments={departments}
@@ -2157,49 +2870,64 @@ export default function App() {
               )}
 
               {(activeTab === "payroll" || activeTab.startsWith("payroll_")) && (
-                <PayrollManagement
-                  employees={employees}
-                  departments={departments}
-                  currentUser={currentUser}
-                  companyConfig={config}
-                  salaryComponents={salaryComponents}
-                  taxConfig={taxConfig}
-                  payrollPeriods={payrollPeriods}
-                  salaryStructures={salaryStructures}
-                  payrollRecords={payrollRecords}
-                  payslips={payslips}
-                  payslipDistributionLogs={payslipDistributionLogs}
-                  payrollApprovals={payrollApprovals}
-                  payrollImportLogs={payrollImportLogs}
-                  payrollSettings={payrollSettings}
-                  initialSubTab={
-                    activeTab.startsWith("payroll_")
-                      ? (activeTab.replace("payroll_", "") === "import" ? "csv_import" : activeTab.replace("payroll_", "") === "export" ? "csv_export" : activeTab.replace("payroll_", ""))
-                      : "dashboard"
-                  }
-                  permissions={currentRolePermissions?.modulePermissions.payroll}
-                  emailLogs={emailLogs}
-                  onUpdateComponents={handleUpdateSalaryComponents}
-                  onUpdateTaxConfig={handleUpdateTaxConfig}
-                  onUpdatePeriods={handleUpdatePayrollPeriods}
-                  onUpdateStructures={handleUpdateSalaryStructures}
-                  onUpdateRecords={handleUpdatePayrollRecords}
-                  onUpdatePayslips={handleUpdatePayslips}
-                  onUpdateDistributionLogs={handleUpdatePayslipDistributionLogs}
-                  onUpdateApprovals={handleUpdatePayrollApprovals}
-                  onUpdateImportLogs={handleUpdatePayrollImportLogs}
-                  onUpdateSettings={handleUpdatePayrollSettings}
-                  onUpdateEmailLogs={handleUpdateEmailLogs}
-                  onDeleteComponent={handleDeleteSalaryComponent}
-                  onDeletePeriod={handleDeletePayrollPeriod}
-                  onDeleteRecord={handleDeletePayrollRecord}
-                  onDeletePayslip={handleDeletePayslip}
-                  onLogAction={handleLogAction}
-                />
+                isEmployeeMode ? (
+                  <MyPayrollView
+                    currentUser={currentUser}
+                    employees={employees}
+                    payslips={payslips}
+                    payrollRecords={payrollRecords}
+                    salaryStructures={salaryStructures}
+                    taxConfig={taxConfig!}
+                    companyConfig={config}
+                    permissions={currentRolePermissions?.modulePermissions.payroll}
+                    initialSubTab={activeTab.startsWith("payroll_") ? activeTab.replace("payroll_", "") : "payslips"}
+                    requestedEmployeeId={requestedEmployeeId}
+                  />
+                ) : (
+                  <PayrollManagement
+                    employees={employees}
+                    departments={departments}
+                    currentUser={currentUser}
+                    companyConfig={config}
+                    salaryComponents={salaryComponents}
+                    taxConfig={taxConfig}
+                    payrollPeriods={payrollPeriods}
+                    salaryStructures={salaryStructures}
+                    payrollRecords={payrollRecords}
+                    payslips={payslips}
+                    payslipDistributionLogs={payslipDistributionLogs}
+                    payrollApprovals={payrollApprovals}
+                    payrollImportLogs={payrollImportLogs}
+                    payrollSettings={payrollSettings}
+                    initialSubTab={
+                      activeTab.startsWith("payroll_")
+                        ? (activeTab.replace("payroll_", "") === "import" ? "csv_import" : activeTab.replace("payroll_", "") === "export" ? "csv_export" : activeTab.replace("payroll_", ""))
+                        : "dashboard"
+                    }
+                    permissions={currentRolePermissions?.modulePermissions.payroll}
+                    emailLogs={emailLogs}
+                    onUpdateComponents={handleUpdateSalaryComponents}
+                    onUpdateTaxConfig={handleUpdateTaxConfig}
+                    onUpdatePeriods={handleUpdatePayrollPeriods}
+                    onUpdateStructures={handleUpdateSalaryStructures}
+                    onUpdateRecords={handleUpdatePayrollRecords}
+                    onUpdatePayslips={handleUpdatePayslips}
+                    onUpdateDistributionLogs={handleUpdatePayslipDistributionLogs}
+                    onUpdateApprovals={handleUpdatePayrollApprovals}
+                    onUpdateImportLogs={handleUpdatePayrollImportLogs}
+                    onUpdateSettings={handleUpdatePayrollSettings}
+                    onUpdateEmailLogs={handleUpdateEmailLogs}
+                    onDeleteComponent={handleDeleteSalaryComponent}
+                    onDeletePeriod={handleDeletePayrollPeriod}
+                    onDeleteRecord={handleDeletePayrollRecord}
+                    onDeletePayslip={handleDeletePayslip}
+                    onLogAction={handleLogAction}
+                  />
+                )
               )}
 
               {/* Map sidebar settings direct nodes to setting panels */}
-              {(activeTab === "settings" || activeTab.startsWith("settings_")) && (
+              {!isEmployeeMode && (activeTab === "settings" || activeTab.startsWith("settings_")) && (
                 <Settings
                   config={config}
                   users={users}
@@ -2223,7 +2951,7 @@ export default function App() {
                 />
               )}
 
-              {(activeTab === "reports" || activeTab.startsWith("reports_")) && (
+              {!isEmployeeMode && (activeTab === "reports" || activeTab.startsWith("reports_")) && (
                 <Reports
                   employees={employees}
                   departments={departments}
@@ -2237,17 +2965,66 @@ export default function App() {
                 />
               )}
 
-              {activeTab === "documents" && (
-                <DocumentVault
-                  employees={employees}
-                  departments={departments}
+              {(activeTab === "documents" || activeTab.startsWith("documents_")) && (
+                isEmployeeMode ? (
+                  <MyDocumentsView
+                    currentUser={currentUser}
+                    employees={employees}
+                    driveAssociations={driveAssociations}
+                    permissions={currentRolePermissions?.modulePermissions.documents}
+                    initialSubTab={activeTab.startsWith("documents_") ? activeTab.replace("documents_", "") : "employment_contract"}
+                    requestedEmployeeId={requestedEmployeeId}
+                  />
+                ) : (
+                  <DocumentVault
+                    employees={employees}
+                    departments={departments}
+                    users={users}
+                    currentUser={currentUser}
+                    permissions={currentRolePermissions?.modulePermissions.documents}
+                    driveAssociations={driveAssociations}
+                    onUpdateDriveAssociations={handleUpdateDriveAssociations}
+                    onLogAction={handleLogAction}
+                  />
+                )
+              )}
+
+              {(activeTab === "requests" || activeTab.startsWith("requests_")) && (
+                <HRRequestsModule
                   currentUser={currentUser}
-                  permissions={currentRolePermissions?.modulePermissions.documents}
-                  onLogAction={handleLogAction}
+                  employees={employees}
+                  hrRequests={hrRequests}
+                  permissions={currentRolePermissions?.modulePermissions.requests}
+                  initialSubTab={activeTab.startsWith("requests_") ? activeTab.replace("requests_", "") : undefined}
+                  requestedEmployeeId={requestedEmployeeId}
+                  onSubmitHRRequest={handleSubmitHRRequest}
+                  onCancelHRRequest={handleCancelHRRequest}
+                  onReviewHRRequest={!isEmployeeMode ? handleReviewHRRequest : undefined}
                 />
               )}
 
-              {activeTab === "help" && (
+              {(activeTab === "notifications" || activeTab.startsWith("notifications_")) && (
+                <NotificationsView
+                  currentUser={currentUser}
+                  notifications={notifications}
+                  permissions={currentRolePermissions?.modulePermissions.notifications}
+                  initialSubTab={activeTab.startsWith("notifications_") ? activeTab.replace("notifications_", "") : "personal"}
+                  onMarkRead={handleMarkNotificationRead}
+                  onPublishAnnouncement={!isEmployeeMode ? handlePublishAnnouncement : undefined}
+                />
+              )}
+
+              {(activeTab === "account" || activeTab.startsWith("account_")) && (
+                <MyAccountView
+                  currentUser={currentUser}
+                  permissions={currentRolePermissions?.modulePermissions.account}
+                  initialSubTab={activeTab.startsWith("account_") ? activeTab.replace("account_", "") : "change_password"}
+                  onUpdateOwnPassword={handleUpdateOwnPassword}
+                  onLogout={handleLogout}
+                />
+              )}
+
+              {!isEmployeeMode && activeTab === "help" && (
                 <HelpCenter 
                   onClose={() => setActiveTab(getFirstPermittedTab())}
                   companyName={config.profile.displayName}

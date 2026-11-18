@@ -29,6 +29,17 @@ import {
   ReportExportPayload
 } from "../utils/reportBranding";
 import { printStructuredReport } from "../utils/reportPrint";
+import {
+  validatePayrollComponentForm,
+  validatePayrollPeriodForm,
+  validateSalarySetupForm,
+  validateBulkSalaryUpdateForm,
+  validateDocumentUpload,
+  buildValidationResult,
+  focusFirstInvalidField
+} from "../utils/validation";
+import { FormFieldError, ValidationSummary, fieldInputClass } from "./ui/FormFeedback";
+import { useToast, ConfirmDialog } from "./ui/ToastProvider";
 
 interface PayrollManagementProps {
   employees: Employee[];
@@ -105,6 +116,15 @@ export default function PayrollManagement({
   onDeletePayslip,
   onLogAction
 }: PayrollManagementProps) {
+  const toast = useToast();
+  const [confirmAction, setConfirmAction] = useState<{
+    title: string;
+    message: React.ReactNode;
+    confirmText?: string;
+    variant?: "danger" | "warning" | "primary";
+    onConfirm: () => void;
+  } | null>(null);
+
   const canCreate = permissions ? permissions.actions.create : currentUser?.role !== "Auditor";
   const canEdit = permissions ? permissions.actions.edit : currentUser?.role !== "Auditor";
   const canDelete = permissions ? permissions.actions.delete : currentUser?.role === "Administrator";
@@ -160,19 +180,21 @@ export default function PayrollManagement({
   };
 
   // Department Head & Employee record scoping
+  const isEmployeeRole = currentUser?.role === "Employee";
   const isDeptHead = currentUser?.role === "Department Head";
+  const effectiveScope = isEmployeeRole ? "own" : (permissions?.dataScope || (isDeptHead ? "team" : "all"));
   const managedDeptIds = useMemo(
-    () => (isDeptHead ? getDepartmentHeadManagedDeptIds(currentUser, departments, employees) : []),
-    [isDeptHead, currentUser, departments, employees]
+    () => ((isDeptHead || effectiveScope === "team") ? getDepartmentHeadManagedDeptIds(currentUser, departments, employees) : []),
+    [isDeptHead, effectiveScope, currentUser, departments, employees]
   );
 
   const isRecordInScope = (employeeId: string, departmentId?: string) => {
-    if (currentUser?.role === "Employee") {
-      const emailLower = currentUser.email?.trim().toLowerCase() || "";
+    if (effectiveScope === "own") {
+      const emailLower = currentUser?.email?.trim().toLowerCase() || "";
       const myEmp = employees.find(e => e.email.trim().toLowerCase() === emailLower);
-      return (myEmp && employeeId === myEmp.employeeId) || (!!currentUser.employeeId && employeeId === currentUser.employeeId);
+      return (myEmp && employeeId === myEmp.employeeId) || (!!currentUser?.employeeId && employeeId === currentUser.employeeId);
     }
-    if (isDeptHead && managedDeptIds.length > 0) {
+    if (effectiveScope === "team" && managedDeptIds.length > 0) {
       if (departmentId && managedDeptIds.includes(departmentId)) return true;
       const emp = employees.find(e => e.employeeId === employeeId);
       return emp ? managedDeptIds.includes(emp.departmentId) : false;
@@ -251,6 +273,9 @@ export default function PayrollManagement({
   const [compTaxCap, setCompTaxCap] = useState<number>(0);
   const [compEffectiveDate, setCompEffectiveDate] = useState(new Date().toISOString().split("T")[0]);
   const [compDesc, setCompDesc] = useState("");
+  const [compErrors, setCompErrors] = useState<Record<string, string>>({});
+  const [compSummary, setCompSummary] = useState("");
+  const [isSavingComp, setIsSavingComp] = useState(false);
 
   const handleOpenCompAdd = () => {
     setEditingComp(null);
@@ -264,6 +289,8 @@ export default function PayrollManagement({
     setCompTaxCap(0);
     setCompEffectiveDate(new Date().toISOString().split("T")[0]);
     setCompDesc("");
+    setCompErrors({});
+    setCompSummary("");
     setCompModalOpen(true);
   };
 
@@ -279,48 +306,81 @@ export default function PayrollManagement({
     setCompTaxCap(c.taxExemptLimitETB || 0);
     setCompEffectiveDate(c.effectiveDate);
     setCompDesc(c.description);
+    setCompErrors({});
+    setCompSummary("");
     setCompModalOpen(true);
   };
 
-  const handleSaveComponent = (e: React.FormEvent) => {
+  const handleSaveComponent = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    if (!compName.trim() || !compCode.trim()) return;
+    if (isSavingComp) return;
 
-    if (editingComp) {
-      const updated = salaryComponents.map(c => c.id === editingComp.id ? {
-        ...c,
-        name: compName.trim(),
-        code: compCode.trim().toUpperCase(),
-        type: compType,
+    const validation = validatePayrollComponentForm(
+      {
+        id: editingComp?.id,
+        name: compName,
+        code: compCode,
         calculationMethod: compMethod,
-        calculationValue: compValue,
-        isTaxable: compTaxable,
-        isPensionable: compPensionable,
-        taxExemptLimitETB: compTaxCap > 0 ? compTaxCap : undefined,
+        calculationValue: String(compValue ?? 0),
         effectiveDate: compEffectiveDate,
-        description: compDesc.trim()
-      } : c);
-      onUpdateComponents(updated);
-      onLogAction("PayrollConfig", "Update Component", compCode, `Updated salary component ${compName}`);
-    } else {
-      const newComp: SalaryComponent = {
-        id: `SC_${Date.now()}`,
-        name: compName.trim(),
-        code: compCode.trim().toUpperCase(),
-        type: compType,
-        calculationMethod: compMethod,
-        calculationValue: compValue,
-        isTaxable: compTaxable,
-        isPensionable: compPensionable,
-        taxExemptLimitETB: compTaxCap > 0 ? compTaxCap : undefined,
-        effectiveDate: compEffectiveDate,
-        status: "Active",
-        description: compDesc.trim()
-      };
-      onUpdateComponents([...salaryComponents, newComp]);
-      onLogAction("PayrollConfig", "Create Component", compCode, `Added new ${compType} component: ${compName}`);
+      },
+      salaryComponents,
+      editingComp ? "edit" : "add"
+    );
+
+    if (!validation.valid) {
+      setCompErrors(validation.errors);
+      setCompSummary(validation.summaryMessage || "Please correct the highlighted component fields.");
+      toast.showError(validation.summaryMessage || "Please correct the highlighted component fields.", "Invalid Salary Component");
+      focusFirstInvalidField(validation.errors, e.currentTarget);
+      return;
     }
-    setCompModalOpen(false);
+
+    setIsSavingComp(true);
+    try {
+      setCompErrors({});
+      setCompSummary("");
+
+      if (editingComp) {
+        const updated = salaryComponents.map(c => c.id === editingComp.id ? {
+          ...c,
+          name: compName.trim(),
+          code: compCode.trim().toUpperCase(),
+          type: compType,
+          calculationMethod: compMethod,
+          calculationValue: compValue,
+          isTaxable: compTaxable,
+          isPensionable: compPensionable,
+          taxExemptLimitETB: compTaxCap > 0 ? compTaxCap : undefined,
+          effectiveDate: compEffectiveDate,
+          description: compDesc.trim()
+        } : c);
+        onUpdateComponents(updated);
+        onLogAction("PayrollConfig", "Update Component", compCode, `Updated salary component ${compName}`);
+        toast.showSuccess(`Salary component "${compName.trim()}" updated successfully.`);
+      } else {
+        const newComp: SalaryComponent = {
+          id: `SC_${Date.now()}`,
+          name: compName.trim(),
+          code: compCode.trim().toUpperCase(),
+          type: compType,
+          calculationMethod: compMethod,
+          calculationValue: compValue,
+          isTaxable: compTaxable,
+          isPensionable: compPensionable,
+          taxExemptLimitETB: compTaxCap > 0 ? compTaxCap : undefined,
+          effectiveDate: compEffectiveDate,
+          status: "Active",
+          description: compDesc.trim()
+        };
+        onUpdateComponents([...salaryComponents, newComp]);
+        onLogAction("PayrollConfig", "Create Component", compCode, `Added new ${compType} component: ${compName}`);
+        toast.showSuccess(`Salary component "${compName.trim()}" created successfully.`);
+      }
+      setCompModalOpen(false);
+    } finally {
+      setIsSavingComp(false);
+    }
   };
 
   const handleToggleCompStatus = (c: SalaryComponent) => {
@@ -328,6 +388,7 @@ export default function PayrollManagement({
     const updated = salaryComponents.map(item => item.id === c.id ? { ...item, status: nextStatus as any } : item);
     onUpdateComponents(updated);
     onLogAction("PayrollConfig", "Toggle Component Status", c.code, `Set component ${c.name} to ${nextStatus}`);
+    toast.showInfo(`Salary component "${c.name}" is now ${nextStatus}.`);
   };
 
   // Statutory Tax Rules Form
@@ -336,10 +397,39 @@ export default function PayrollManagement({
   const [erPensionRate, setErPensionRate] = useState(activeTaxConfig.employerPensionRate * 100);
   const [transportCap, setTransportCap] = useState(activeTaxConfig.transportTaxExemptLimit || 2200);
   const [bracketsState, setBracketsState] = useState<TaxBracket[]>(activeTaxConfig.taxBrackets || []);
+  const [taxErrors, setTaxErrors] = useState<Record<string, string>>({});
+  const [taxSummary, setTaxSummary] = useState("");
 
-  const handleSaveTaxConfig = (e: React.FormEvent) => {
+  const handleSaveTaxConfig = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    if (!canEdit) return;
+    if (!canEdit) {
+      toast.showError("You do not have permission to edit statutory tax and pension rules.", "Access Denied");
+      return;
+    }
+
+    const errors: Record<string, string> = {};
+    if (Number.isNaN(eePensionRate) || !Number.isFinite(eePensionRate) || eePensionRate < 0 || eePensionRate > 50) {
+      errors.eePensionRate = "Employee pension rate must be between 0% and 50%.";
+    }
+    if (Number.isNaN(erPensionRate) || !Number.isFinite(erPensionRate) || erPensionRate < 0 || erPensionRate > 50) {
+      errors.erPensionRate = "Employer pension rate must be between 0% and 50%.";
+    }
+    if (Number.isNaN(transportCap) || !Number.isFinite(transportCap) || transportCap < 0) {
+      errors.transportCap = "Transport tax-exempt cap cannot be negative.";
+    }
+
+    const validation = buildValidationResult(errors);
+    if (!validation.valid) {
+      setTaxErrors(validation.errors);
+      setTaxSummary(validation.summaryMessage || "Please correct the highlighted statutory rule fields.");
+      toast.showError(validation.summaryMessage || "Please correct the highlighted statutory rule fields.", "Validation Error");
+      focusFirstInvalidField(validation.errors, e.currentTarget);
+      return;
+    }
+
+    setTaxErrors({});
+    setTaxSummary("");
+
     const updated: TaxConfiguration = {
       ...activeTaxConfig,
       employeePensionRate: eePensionRate / 100,
@@ -351,7 +441,7 @@ export default function PayrollManagement({
     };
     onUpdateTaxConfig(updated);
     onLogAction("PayrollConfig", "Update Statutory Rules", "Ethiopia Tax & Pension", "Saved updated employment tax brackets and pension contribution rates");
-    alert("Ethiopian statutory tax and pension configuration updated successfully!");
+    toast.showSuccess("Ethiopian statutory tax and pension configuration updated successfully.");
   };
 
   // Payroll Period Management Form
@@ -360,40 +450,67 @@ export default function PayrollManagement({
   const [pStart, setPStart] = useState("");
   const [pEnd, setPEnd] = useState("");
   const [pPayment, setPPayment] = useState("");
+  const [periodErrors, setPeriodErrors] = useState<Record<string, string>>({});
+  const [periodFormSummary, setPeriodFormSummary] = useState("");
+  const [isSavingPeriod, setIsSavingPeriod] = useState(false);
 
   const handleOpenPeriodAdd = () => {
     setPName("");
     setPStart(new Date().toISOString().substring(0, 7) + "-01");
     setPEnd(new Date().toISOString().substring(0, 10));
     setPPayment(new Date().toISOString().substring(0, 10));
+    setPeriodErrors({});
+    setPeriodFormSummary("");
     setPeriodModalOpen(true);
   };
 
-  const handleSavePeriod = (e: React.FormEvent) => {
+  const handleSavePeriod = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    if (!pName.trim() || !pStart || !pEnd) return;
+    if (isSavingPeriod) return;
 
-    const exists = payrollPeriods.some(p => p.periodName.toLowerCase() === pName.trim().toLowerCase());
-    if (exists) {
-      alert("A payroll period with this name already exists.");
+    const validation = validatePayrollPeriodForm(
+      {
+        periodName: pName,
+        startDate: pStart,
+        endDate: pEnd,
+        paymentDate: pPayment,
+      },
+      payrollPeriods,
+      "add"
+    );
+
+    if (!validation.valid) {
+      setPeriodErrors(validation.errors);
+      setPeriodFormSummary(validation.summaryMessage || "Please correct the highlighted payroll period fields.");
+      toast.showError(validation.summaryMessage || "Please correct the highlighted payroll period fields.", "Invalid Payroll Period");
+      focusFirstInvalidField(validation.errors, e.currentTarget);
       return;
     }
 
-    const newPeriod: PayrollPeriod = {
-      id: `PP_${Date.now()}`,
-      periodName: pName.trim(),
-      startDate: pStart,
-      endDate: pEnd,
-      paymentDate: pPayment,
-      status: "Open",
-      createdBy: currentUser?.email || "Admin",
-      createdDate: new Date().toISOString().split("T")[0]
-    };
+    setIsSavingPeriod(true);
+    try {
+      setPeriodErrors({});
+      setPeriodFormSummary("");
 
-    onUpdatePeriods([...payrollPeriods, newPeriod]);
-    setSelectedPeriodId(newPeriod.id);
-    onLogAction("PayrollConfig", "Create Period", newPeriod.periodName, `Defined new monthly payroll period: ${newPeriod.startDate} -> ${newPeriod.endDate}`);
-    setPeriodModalOpen(false);
+      const newPeriod: PayrollPeriod = {
+        id: `PP_${Date.now()}`,
+        periodName: pName.trim(),
+        startDate: pStart,
+        endDate: pEnd,
+        paymentDate: pPayment,
+        status: "Open",
+        createdBy: currentUser?.email || "Admin",
+        createdDate: new Date().toISOString().split("T")[0]
+      };
+
+      onUpdatePeriods([...payrollPeriods, newPeriod]);
+      setSelectedPeriodId(newPeriod.id);
+      onLogAction("PayrollConfig", "Create Period", newPeriod.periodName, `Defined new monthly payroll period: ${newPeriod.startDate} -> ${newPeriod.endDate}`);
+      toast.showSuccess(`Payroll period "${newPeriod.periodName}" created successfully.`);
+      setPeriodModalOpen(false);
+    } finally {
+      setIsSavingPeriod(false);
+    }
   };
 
   const handleTogglePeriodLock = (period: PayrollPeriod) => {
@@ -426,6 +543,9 @@ export default function PayrollManagement({
   const [structPensionEligible, setStructPensionEligible] = useState(true);
   const [structEffectiveDate, setStructEffectiveDate] = useState(new Date().toISOString().split("T")[0]);
   const [structRevisionReason, setStructRevisionReason] = useState("");
+  const [salaryErrors, setSalaryErrors] = useState<Record<string, string>>({});
+  const [salarySummary, setSalarySummary] = useState("");
+  const [isSavingSalary, setIsSavingSalary] = useState(false);
 
   const handleOpenSalarySetup = (emp: Employee) => {
     setSelectedEmpForSetup(emp);
@@ -462,56 +582,91 @@ export default function PayrollManagement({
       setStructEffectiveDate(new Date().toISOString().split("T")[0]);
       setStructRevisionReason("Initial Placement");
     }
+    setSalaryErrors({});
+    setSalarySummary("");
     setSalaryModalOpen(true);
   };
 
-  const handleSaveSalarySetup = (e: React.FormEvent) => {
+  const handleSaveSalarySetup = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    if (!selectedEmpForSetup) return;
+    if (!selectedEmpForSetup || isSavingSalary) return;
 
-    const existing = salaryStructures.find(s => s.employeeId === selectedEmpForSetup.employeeId);
-
-    const revisionItem = {
-      id: `REV_${Date.now()}`,
-      basicSalary: structBasic,
-      positionAllowance: structPosition,
-      effectiveDate: structEffectiveDate,
-      reason: structRevisionReason.trim() || "Regular Salary Adjustment",
-      updatedBy: currentUser?.fullName || "HR Officer",
-      updatedDate: new Date().toISOString().split("T")[0]
-    };
-
-    const newStruct: EmployeeSalaryStructure = {
-      id: existing ? existing.id : `SS_${selectedEmpForSetup.employeeId}`,
+    const validation = validateSalarySetupForm({
       employeeId: selectedEmpForSetup.employeeId,
-      basicSalary: Number(structBasic),
-      salaryGrade: structGrade.trim(),
-      positionAllowance: Number(structPosition),
-      transportAllowance: Number(structTransport),
-      housingAllowance: Number(structHousing),
-      responsibilityAllowance: Number(structResponsibility),
-      telephoneAllowance: Number(structTelephone),
-      overtimeAmount: Number(structOvertime),
-      otherEarnings: Number(structOtherEarnings),
-      recurringDeductions: {
-        LOAN: Number(structLoanDeduction),
-        OD: Number(structOtherDeduction)
-      },
-      isPensionEligible: structPensionEligible,
+      basicSalary: String(structBasic),
+      positionAllowance: String(structPosition),
+      transportAllowance: String(structTransport),
+      housingAllowance: String(structHousing),
+      responsibilityAllowance: String(structResponsibility),
+      telephoneAllowance: String(structTelephone),
+      overtimeAmount: String(structOvertime),
+      otherEarnings: String(structOtherEarnings),
       effectiveDate: structEffectiveDate,
-      updatedBy: currentUser?.fullName || "HR Officer",
-      updatedDate: new Date().toISOString().split("T")[0],
-      revisionHistory: existing ? [revisionItem, ...(existing.revisionHistory || [])] : [revisionItem]
-    };
+      recurringDeductions: {
+        LOAN: String(structLoanDeduction),
+        OD: String(structOtherDeduction),
+      },
+    });
 
-    const updatedList = existing 
-      ? salaryStructures.map(s => s.employeeId === selectedEmpForSetup.employeeId ? newStruct : s)
-      : [...salaryStructures, newStruct];
+    if (!validation.valid) {
+      setSalaryErrors(validation.errors);
+      setSalarySummary(validation.summaryMessage || "Please correct the highlighted salary fields.");
+      toast.showError(validation.summaryMessage || "Please correct the highlighted salary fields.", "Invalid Salary Structure");
+      focusFirstInvalidField(validation.errors, e.currentTarget);
+      return;
+    }
 
-    onUpdateStructures(updatedList);
-    onLogAction("SalarySetup", "Update Employee Structure", selectedEmpForSetup.employeeId, `Updated base salary to ${structBasic} ETB for ${selectedEmpForSetup.fullName}`);
-    alert(`Salary structure configured successfully for ${selectedEmpForSetup.fullName}!`);
-    setSalaryModalOpen(false);
+    setIsSavingSalary(true);
+    try {
+      setSalaryErrors({});
+      setSalarySummary("");
+
+      const existing = salaryStructures.find(s => s.employeeId === selectedEmpForSetup.employeeId);
+
+      const revisionItem = {
+        id: `REV_${Date.now()}`,
+        basicSalary: structBasic,
+        positionAllowance: structPosition,
+        effectiveDate: structEffectiveDate,
+        reason: structRevisionReason.trim() || "Regular Salary Adjustment",
+        updatedBy: currentUser?.fullName || "HR Officer",
+        updatedDate: new Date().toISOString().split("T")[0]
+      };
+
+      const newStruct: EmployeeSalaryStructure = {
+        id: existing ? existing.id : `SS_${selectedEmpForSetup.employeeId}`,
+        employeeId: selectedEmpForSetup.employeeId,
+        basicSalary: Number(structBasic),
+        salaryGrade: structGrade.trim(),
+        positionAllowance: Number(structPosition),
+        transportAllowance: Number(structTransport),
+        housingAllowance: Number(structHousing),
+        responsibilityAllowance: Number(structResponsibility),
+        telephoneAllowance: Number(structTelephone),
+        overtimeAmount: Number(structOvertime),
+        otherEarnings: Number(structOtherEarnings),
+        recurringDeductions: {
+          LOAN: Number(structLoanDeduction),
+          OD: Number(structOtherDeduction)
+        },
+        isPensionEligible: structPensionEligible,
+        effectiveDate: structEffectiveDate,
+        updatedBy: currentUser?.fullName || "HR Officer",
+        updatedDate: new Date().toISOString().split("T")[0],
+        revisionHistory: existing ? [revisionItem, ...(existing.revisionHistory || [])] : [revisionItem]
+      };
+
+      const updatedList = existing 
+        ? salaryStructures.map(s => s.employeeId === selectedEmpForSetup.employeeId ? newStruct : s)
+        : [...salaryStructures, newStruct];
+
+      onUpdateStructures(updatedList);
+      onLogAction("SalarySetup", "Update Employee Structure", selectedEmpForSetup.employeeId, `Updated base salary to ${structBasic} ETB for ${selectedEmpForSetup.fullName}`);
+      toast.showSuccess(`Salary structure configured successfully for ${selectedEmpForSetup.fullName}.`);
+      setSalaryModalOpen(false);
+    } finally {
+      setIsSavingSalary(false);
+    }
   };
 
   // Revision History Modal
@@ -522,46 +677,76 @@ export default function PayrollManagement({
   const [bulkType, setBulkType] = useState<"Percentage" | "Fixed">("Percentage");
   const [bulkValue, setBulkValue] = useState<number>(5);
   const [bulkDept, setBulkDept] = useState<string>("");
+  const [bulkErrors, setBulkErrors] = useState<Record<string, string>>({});
+  const [bulkSummary, setBulkSummary] = useState("");
+  const [isApplyingBulk, setIsApplyingBulk] = useState(false);
 
-  const handleApplyBulkSalaryUpdate = () => {
-    if (bulkValue <= 0) return;
-    const targetEmps = activeEmployees.filter(e => !bulkDept || e.departmentId === bulkDept);
-    
-    let updatedCount = 0;
-    const updatedStructures = salaryStructures.map(struct => {
-      const isTarget = targetEmps.some(e => e.employeeId === struct.employeeId);
-      if (isTarget) {
-        updatedCount++;
-        const newBasic = bulkType === "Percentage" 
-          ? Math.round(struct.basicSalary * (1 + bulkValue / 100))
-          : struct.basicSalary + bulkValue;
+  const handleApplyBulkSalaryUpdate = (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    if (isApplyingBulk) return;
 
-        return {
-          ...struct,
-          basicSalary: newBasic,
-          updatedBy: currentUser?.fullName || "HR Admin",
-          updatedDate: new Date().toISOString().split("T")[0],
-          revisionHistory: [
-            {
-              id: `REV_BULK_${Date.now()}`,
-              basicSalary: newBasic,
-              positionAllowance: struct.positionAllowance,
-              effectiveDate: new Date().toISOString().split("T")[0],
-              reason: `Bulk ${bulkType} adjustment (+${bulkValue}${bulkType === "Percentage" ? "%" : " ETB"})`,
-              updatedBy: currentUser?.fullName || "HR Admin",
-              updatedDate: new Date().toISOString().split("T")[0]
-            },
-            ...(struct.revisionHistory || [])
-          ]
-        };
-      }
-      return struct;
+    const targetEmps = activeEmployees.filter(emp => !bulkDept || emp.departmentId === bulkDept);
+    const matchingStructCount = salaryStructures.filter(struct =>
+      targetEmps.some(emp => emp.employeeId === struct.employeeId)
+    ).length;
+
+    const validation = validateBulkSalaryUpdateForm({
+      bulkValue: String(bulkValue),
+      bulkMode: bulkType === "Percentage" ? "PercentIncrease" : "FixedAdd",
+      targetCount: matchingStructCount,
     });
 
-    onUpdateStructures(updatedStructures);
-    onLogAction("SalarySetup", "Bulk Salary Revision", `Count: ${updatedCount}`, `Applied ${bulkValue}${bulkType === "Percentage" ? "%" : " ETB"} salary increase across ${updatedCount} employees`);
-    alert(`Bulk salary adjustment applied to ${updatedCount} employee records!`);
-    setBulkSalaryModalOpen(false);
+    if (!validation.valid) {
+      setBulkErrors(validation.errors);
+      setBulkSummary(validation.summaryMessage || "Please correct the highlighted bulk adjustment fields.");
+      toast.showError(validation.summaryMessage || "Please correct the highlighted bulk adjustment fields.", "Invalid Bulk Adjustment");
+      focusFirstInvalidField(validation.errors, e.currentTarget);
+      return;
+    }
+
+    setIsApplyingBulk(true);
+    try {
+      setBulkErrors({});
+      setBulkSummary("");
+
+      let updatedCount = 0;
+      const updatedStructures = salaryStructures.map(struct => {
+        const isTarget = targetEmps.some(emp => emp.employeeId === struct.employeeId);
+        if (isTarget) {
+          updatedCount++;
+          const newBasic = bulkType === "Percentage" 
+            ? Math.round(struct.basicSalary * (1 + bulkValue / 100))
+            : struct.basicSalary + bulkValue;
+
+          return {
+            ...struct,
+            basicSalary: newBasic,
+            updatedBy: currentUser?.fullName || "HR Admin",
+            updatedDate: new Date().toISOString().split("T")[0],
+            revisionHistory: [
+              {
+                id: `REV_BULK_${Date.now()}`,
+                basicSalary: newBasic,
+                positionAllowance: struct.positionAllowance,
+                effectiveDate: new Date().toISOString().split("T")[0],
+                reason: `Bulk ${bulkType} adjustment (+${bulkValue}${bulkType === "Percentage" ? "%" : " ETB"})`,
+                updatedBy: currentUser?.fullName || "HR Admin",
+                updatedDate: new Date().toISOString().split("T")[0]
+              },
+              ...(struct.revisionHistory || [])
+            ]
+          };
+        }
+        return struct;
+      });
+
+      onUpdateStructures(updatedStructures);
+      onLogAction("SalarySetup", "Bulk Salary Revision", `Count: ${updatedCount}`, `Applied ${bulkValue}${bulkType === "Percentage" ? "%" : " ETB"} salary increase across ${updatedCount} employees`);
+      toast.showSuccess(`Bulk salary adjustment applied to ${updatedCount} employee record(s).`);
+      setBulkSalaryModalOpen(false);
+    } finally {
+      setIsApplyingBulk(false);
+    }
   };
 
   // ==========================================
@@ -573,7 +758,12 @@ export default function PayrollManagement({
 
   const handleExecuteBulkCalculation = () => {
     if (selectedPeriod.status === "Approved" || selectedPeriod.status === "Locked") {
-      alert("This payroll period is Locked / Approved and cannot be recalculated.");
+      toast.showWarning("This payroll period is Locked / Approved and cannot be recalculated.", "Period Locked");
+      return;
+    }
+
+    if (activeEmployees.length === 0) {
+      toast.showWarning("No active employees are available in scope for payroll calculation.");
       return;
     }
 
@@ -626,12 +816,12 @@ export default function PayrollManagement({
     onUpdatePeriods(updatedPeriods);
 
     onLogAction("PayrollProcessing", "Calculate Period Payroll", selectedPeriod.periodName, `Calculated payroll ledger for ${calculatedList.length} employees. Total Net: ${calculatedList.reduce((s, r) => s + r.netSalary, 0).toLocaleString()} ETB`);
-    alert(`Payroll calculation completed for ${calculatedList.length} employees in ${selectedPeriod.periodName}!`);
+    toast.showSuccess(`Payroll calculation completed for ${calculatedList.length} employees in ${selectedPeriod.periodName}.`);
   };
 
   const handleSubmittedForApproval = () => {
     if (currentPeriodRecords.length === 0) {
-      alert("Please calculate payroll before submitting for approval.");
+      toast.showWarning("Please calculate payroll before submitting for approval.", "No Records Calculated");
       return;
     }
 
@@ -664,7 +854,7 @@ export default function PayrollManagement({
     onUpdatePeriods(updatedPeriods);
 
     onLogAction("PayrollApproval", "Submit Payroll Approval", selectedPeriod.periodName, `Submitted period ${selectedPeriod.periodName} payroll for executive review (${periodSummary.totalNet.toLocaleString()} ETB Net)`);
-    alert(`Payroll for ${selectedPeriod.periodName} submitted for executive approval!`);
+    toast.showSuccess(`Payroll for ${selectedPeriod.periodName} submitted for executive approval.`);
   };
 
   // ==========================================
@@ -672,12 +862,18 @@ export default function PayrollManagement({
   // ==========================================
   const [approvalModalOpen, setApprovalModalOpen] = useState(false);
   const [approvalComments, setApprovalComments] = useState("");
+  const [approvalCommentError, setApprovalCommentError] = useState("");
 
   const handleApprovePayroll = () => {
     if (!canApprove) {
-      alert("Role Restriction: Your role does not have authorization to execute final payroll approvals.");
+      toast.showError("Role Restriction: Your role does not have authorization to execute final payroll approvals.", "Access Denied");
       return;
     }
+    if (currentPeriodRecords.length === 0) {
+      toast.showWarning("No calculated payroll records exist for this period to approve.");
+      return;
+    }
+    setApprovalCommentError("");
 
     const currentApproval = payrollApprovals.find(a => a.payrollPeriodId === selectedPeriod.id);
     
@@ -752,15 +948,23 @@ export default function PayrollManagement({
     onUpdatePayslips([...otherPayslips, ...generatedPayslipsList]);
 
     onLogAction("PayrollApproval", "Approve Payroll", selectedPeriod.periodName, `Executive approval granted for period ${selectedPeriod.periodName}. Generated ${generatedPayslipsList.length} employee payslips.`);
-    alert(`Payroll for ${selectedPeriod.periodName} approved! ${generatedPayslipsList.length} payslips generated.`);
+    toast.showSuccess(`Payroll for ${selectedPeriod.periodName} approved! ${generatedPayslipsList.length} payslip(s) generated.`);
     setApprovalModalOpen(false);
   };
 
   const handleRejectPayroll = () => {
     if (!canApprove) {
-      alert("Role Restriction: Your role does not have authorization to reject submitted payroll.");
+      toast.showError("Role Restriction: Your role does not have authorization to reject submitted payroll.", "Access Denied");
       return;
     }
+    if (!approvalComments.trim()) {
+      const msg = "Please enter an audit comment explaining why this payroll is being rejected.";
+      setApprovalCommentError(msg);
+      toast.showError(msg, "Rejection Comment Required");
+      focusFirstInvalidField({ approvalComments: msg });
+      return;
+    }
+    setApprovalCommentError("");
 
     const updatedApprovals = payrollApprovals.map(a => a.payrollPeriodId === selectedPeriod.id ? {
       ...a,
@@ -777,7 +981,7 @@ export default function PayrollManagement({
     onUpdatePeriods(updatedPeriods);
 
     onLogAction("PayrollApproval", "Reject Payroll", selectedPeriod.periodName, `Rejected payroll submission for ${selectedPeriod.periodName}. Comments: ${approvalComments}`);
-    alert(`Payroll for ${selectedPeriod.periodName} rejected and returned to Open state for corrections.`);
+    toast.showInfo(`Payroll for ${selectedPeriod.periodName} rejected and returned to Open state for corrections.`);
     setApprovalModalOpen(false);
   };
 
@@ -792,17 +996,17 @@ export default function PayrollManagement({
     const emp = employees.find(e => e.employeeId === ps.employeeId);
     const targetEmail = emp?.email || `${ps.employeeId.toLowerCase()}@ethiopianre.com`;
 
-    const emailResult = sendSystemEmail({
+    const result = sendSystemEmail({
       recipientEmployeeId: ps.employeeId,
       recipientEmail: targetEmail,
       subject: `ETHIO-RE Payslip Statement - ${ps.payrollPeriodName}`,
-      sendingModule: "Payslip Distribution",
-      currentUserEmail: currentUser?.email,
-      config: companyConfig || { profile: {}, branding: {}, leaveAllocations: {} } as any
+      sendingModule: "Payslips",
+      currentUserEmail: currentUser?.email || "system@ethiopianre.com",
+      config: companyConfig || ({ profile: {}, branding: {}, leaveAllocations: {} } as any)
     });
 
     if (onUpdateEmailLogs) {
-      onUpdateEmailLogs([emailResult.logEntry, ...(emailLogs || [])]);
+      onUpdateEmailLogs([result.logEntry, ...(emailLogs || [])]);
     }
 
     const logItem: PayslipDistributionLog = {
@@ -813,30 +1017,30 @@ export default function PayrollManagement({
       payrollPeriodId: ps.payrollPeriodId,
       payrollPeriodName: ps.payrollPeriodName,
       sendingDate: new Date().toISOString().replace("T", " ").substring(0, 19),
-      deliveryStatus: emailResult.blocked ? "Failed" : "Sent",
-      errorDetails: emailResult.blocked ? "Blocked – Employee Email Sending Disabled in Settings" : undefined,
+      deliveryStatus: result.success ? "Sent" : "Failed",
+      errorDetails: result.success ? undefined : result.message,
       sentBy: currentUser?.email || "system@ethiopianre.com"
     };
 
     onUpdateDistributionLogs([logItem, ...payslipDistributionLogs]);
-    onLogAction("Payslips", emailResult.blocked ? "Payslip Email Blocked" : "Send Payslip Email", ps.payslipRefNo, emailResult.message);
+    onLogAction("Payslips", result.blocked ? "Payslip Email Blocked" : "Send Payslip Email", ps.payslipRefNo, result.message);
 
-    if (emailResult.blocked) {
-      alert(`EMAIL ACTION BLOCKED:\n\n${emailResult.message}\n\nTo enable outgoing email notifications, an Administrator must switch ON "Enable Email Sending to Registered Employees" in Administration → Email Settings.`);
+    if (result.blocked) {
+      toast.showWarning(`${result.message} Enable Employee Email Sending in Administration -> Company Profile / Email Settings.`, "Email Action Blocked");
     } else {
-      alert(`Payslip statement for ${ps.employeeName} emailed successfully to ${targetEmail}!`);
+      toast.showSuccess(`Payslip statement for ${ps.employeeName} emailed successfully to ${targetEmail}.`);
     }
   };
 
   const handleBulkSendPayslips = () => {
     const periodPayslips = payslips.filter(ps => ps.payrollPeriodId === selectedPeriod.id);
     if (periodPayslips.length === 0) {
-      alert("No payslips available for the selected period.");
+      toast.showWarning("No payslips available for the selected period.");
       return;
     }
 
     const newDistributionLogs: PayslipDistributionLog[] = [];
-    const newSystemEmailLogs: EmailActivityLog[] = [];
+    const newEmailLogs: EmailActivityLog[] = [];
     let blockedCount = 0;
     let sentCount = 0;
 
@@ -844,17 +1048,17 @@ export default function PayrollManagement({
       const emp = employees.find(e => e.employeeId === ps.employeeId);
       const targetEmail = emp?.email || `${ps.employeeId.toLowerCase()}@ethiopianre.com`;
 
-      const emailResult = sendSystemEmail({
+      const result = sendSystemEmail({
         recipientEmployeeId: ps.employeeId,
         recipientEmail: targetEmail,
         subject: `ETHIO-RE Monthly Payslip Statement - ${selectedPeriod.periodName}`,
-        sendingModule: "Payslip Distribution",
-        currentUserEmail: currentUser?.email,
-        config: companyConfig || { profile: {}, branding: {}, leaveAllocations: {} } as any
+        sendingModule: "Payslips",
+        currentUserEmail: currentUser?.email || "system@ethiopianre.com",
+        config: companyConfig || ({ profile: {}, branding: {}, leaveAllocations: {} } as any)
       });
 
-      newSystemEmailLogs.push(emailResult.logEntry);
-      if (emailResult.blocked) blockedCount++;
+      newEmailLogs.push(result.logEntry);
+      if (result.blocked) blockedCount++;
       else sentCount++;
 
       newDistributionLogs.push({
@@ -865,23 +1069,33 @@ export default function PayrollManagement({
         payrollPeriodId: ps.payrollPeriodId,
         payrollPeriodName: ps.payrollPeriodName,
         sendingDate: new Date().toISOString().replace("T", " ").substring(0, 19),
-        deliveryStatus: emailResult.blocked ? "Failed" : "Sent",
-        errorDetails: emailResult.blocked ? "Blocked – Email Sending Disabled in Settings" : undefined,
+        deliveryStatus: result.success ? "Sent" : "Failed",
+        errorDetails: result.success ? undefined : result.message,
         sentBy: currentUser?.email || "system@ethiopianre.com"
       });
     });
 
     if (onUpdateEmailLogs) {
-      onUpdateEmailLogs([...newSystemEmailLogs, ...(emailLogs || [])]);
+      onUpdateEmailLogs([...newEmailLogs, ...(emailLogs || [])]);
     }
 
     onUpdateDistributionLogs([...newDistributionLogs, ...payslipDistributionLogs]);
-    onLogAction("Payslips", "Bulk Email Payslips", selectedPeriod.periodName, `Bulk emailed ${periodPayslips.length} payslips for period ${selectedPeriod.periodName} (${sentCount} sent, ${blockedCount} blocked)`);
+    onLogAction(
+      "Payslips",
+      blockedCount > 0 ? "Bulk Email Payslips Blocked" : "Bulk Email Payslips",
+      selectedPeriod.periodName,
+      blockedCount > 0
+        ? `Bulk payslip dispatch blocked by master switch (${blockedCount} blocked)`
+        : `Dispatched payslip emails to ${sentCount} employees for ${selectedPeriod.periodName}`
+    );
 
     if (blockedCount > 0) {
-      alert(`BULK EMAIL DISPATCH NOTICE:\n\nGlobal Employee Email Sending is currently DISABLED in Administration → Email Settings.\n\nResult: All ${blockedCount} payslip email dispatches were BLOCKED and logged under Email Activity Logs.`);
+      toast.showWarning(
+        `Employee Email Sending is disabled in settings. ${blockedCount} dispatch(es) were blocked and logged.`,
+        "Bulk Email Dispatch Blocked"
+      );
     } else {
-      alert(`Bulk payslip distribution completed! ${sentCount} emails dispatched successfully.`);
+      toast.showSuccess(`Bulk payslip distribution completed! ${sentCount} email(s) dispatched successfully.`);
     }
   };
 
@@ -891,6 +1105,7 @@ export default function PayrollManagement({
   const [importMode, setImportMode] = useState<"Salary Structure" | "Monthly Payroll">("Monthly Payroll");
   const [csvFileText, setCsvFileText] = useState("");
   const [csvFileName, setCsvFileName] = useState("");
+  const [csvUploadError, setCsvUploadError] = useState("");
   const [importParsedRows, setImportParsedRows] = useState<string[][]>([]);
   const [importValidationResult, setImportValidationResult] = useState<{
     validRecords: PayrollRecord[];
@@ -902,12 +1117,38 @@ export default function PayrollManagement({
     const file = e.target.files?.[0];
     if (!file) return;
 
+    const fileCheck = validateDocumentUpload(file, {
+      maxSizeMB: 10,
+      allowedExtensions: ["csv"],
+    });
+    if (!fileCheck.valid) {
+      const msg = fileCheck.error || "Please select a valid CSV file.";
+      setCsvUploadError(msg);
+      toast.showError(msg, "Invalid CSV File");
+      e.target.value = "";
+      return;
+    }
+
+    setCsvUploadError("");
     setCsvFileName(file.name);
     const reader = new FileReader();
+    reader.onerror = () => {
+      const msg = "Unable to read the selected CSV file. Please verify file permissions and try again.";
+      setCsvUploadError(msg);
+      toast.showError(msg, "File Read Error");
+    };
     reader.onload = (evt) => {
       const text = evt.target?.result as string;
       setCsvFileText(text);
       const parsed = parseCsvString(text);
+      if (parsed.length <= 1) {
+        const msg = "The uploaded CSV file contains no payroll data rows.";
+        setCsvUploadError(msg);
+        setImportParsedRows([]);
+        setImportValidationResult(null);
+        toast.showWarning(msg);
+        return;
+      }
       setImportParsedRows(parsed);
 
       const valResult = validatePayrollImportRows(
@@ -917,6 +1158,11 @@ export default function PayrollManagement({
         currentPeriodRecords
       );
       setImportValidationResult(valResult);
+      if (valResult.summary.failed > 0) {
+        toast.showWarning(`CSV parsed with ${valResult.summary.successful} valid row(s) and ${valResult.summary.failed} row error(s).`);
+      } else {
+        toast.showSuccess(`CSV validated: ${valResult.summary.successful} valid employee row(s) ready to import.`);
+      }
     };
     reader.readAsText(file);
   };
@@ -946,7 +1192,7 @@ export default function PayrollManagement({
 
   const handleExecuteImportCommit = () => {
     if (!importValidationResult || importValidationResult.validRecords.length === 0) {
-      alert("No valid employee rows to import.");
+      toast.showWarning("No valid employee rows are available to import.");
       return;
     }
 
@@ -972,11 +1218,12 @@ export default function PayrollManagement({
 
     onUpdateImportLogs([importLog, ...payrollImportLogs]);
     onLogAction("CSVImport", "Execute Payroll Import", csvFileName, `Successfully imported ${newRecords.length} employee records into period ${selectedPeriod.periodName}`);
-    alert(`Import executed successfully! Added ${newRecords.length} records to ${selectedPeriod.periodName}.`);
+    toast.showSuccess(`Import executed successfully! Added ${newRecords.length} record(s) to ${selectedPeriod.periodName}.`);
 
     // Reset import form
     setCsvFileText("");
     setCsvFileName("");
+    setCsvUploadError("");
     setImportParsedRows([]);
     setImportValidationResult(null);
   };
@@ -2030,9 +2277,27 @@ export default function PayrollManagement({
                               {canDelete && (
                                 <button
                                   onClick={() => {
-                                    if (window.confirm(`Are you sure you want to delete salary component ${c.name} (${c.code})?`)) {
-                                      onDeleteComponent && onDeleteComponent(c.id);
-                                    }
+                                    setConfirmAction({
+                                      title: "Delete Salary Component",
+                                      message: (
+                                        <span>
+                                          Are you sure you want to delete salary component{" "}
+                                          <strong className="text-slate-900">{c.name} ({c.code})</strong>?
+                                          This will remove the component from payroll configuration.
+                                        </span>
+                                      ),
+                                      confirmText: "Delete Component",
+                                      variant: "danger",
+                                      onConfirm: () => {
+                                        if (onDeleteComponent) {
+                                          const ok = onDeleteComponent(c.id);
+                                          if (ok !== false) {
+                                            toast.showSuccess(`Salary component "${c.name}" deleted.`);
+                                          }
+                                        }
+                                        setConfirmAction(null);
+                                      },
+                                    });
                                   }}
                                   className="p-1 text-slate-400 hover:text-rose-700 hover:bg-rose-50 rounded"
                                   title="Delete Component"
@@ -2091,7 +2356,8 @@ export default function PayrollManagement({
                   </table>
                 </div>
 
-                <form onSubmit={handleSaveTaxConfig} className="pt-4 border-t space-y-4">
+                <form onSubmit={handleSaveTaxConfig} noValidate className="pt-4 border-t space-y-4">
+                  <ValidationSummary message={taxSummary} errors={taxErrors} />
                   <h4 className="text-xs font-extrabold text-slate-800 uppercase">Statutory Pension &amp; Exemption Limits</h4>
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                     <div>
@@ -2099,12 +2365,16 @@ export default function PayrollManagement({
                       <input
                         type="number"
                         step="0.1"
+                        data-field="eePensionRate"
                         value={eePensionRate}
-                        onChange={(e) => setEePensionRate(Number(e.target.value))}
+                        onChange={(e) => {
+                          setEePensionRate(Number(e.target.value));
+                          setTaxErrors(prev => ({ ...prev, eePensionRate: "" }));
+                        }}
                         readOnly={!canEdit}
-                        className="w-full px-3 py-1.5 border rounded-lg text-xs font-bold"
-                        required
+                        className={fieldInputClass(Boolean(taxErrors.eePensionRate), "w-full px-3 py-1.5 border rounded-lg text-xs font-bold")}
                       />
+                      <FormFieldError error={taxErrors.eePensionRate} />
                       <span className="text-[10px] text-slate-400">Default statutory rate: 7%</span>
                     </div>
 
@@ -2113,12 +2383,16 @@ export default function PayrollManagement({
                       <input
                         type="number"
                         step="0.1"
+                        data-field="erPensionRate"
                         value={erPensionRate}
-                        onChange={(e) => setErPensionRate(Number(e.target.value))}
+                        onChange={(e) => {
+                          setErPensionRate(Number(e.target.value));
+                          setTaxErrors(prev => ({ ...prev, erPensionRate: "" }));
+                        }}
                         readOnly={!canEdit}
-                        className="w-full px-3 py-1.5 border rounded-lg text-xs font-bold"
-                        required
+                        className={fieldInputClass(Boolean(taxErrors.erPensionRate), "w-full px-3 py-1.5 border rounded-lg text-xs font-bold")}
                       />
+                      <FormFieldError error={taxErrors.erPensionRate} />
                       <span className="text-[10px] text-slate-400">Default statutory rate: 11%</span>
                     </div>
 
@@ -2126,12 +2400,16 @@ export default function PayrollManagement({
                       <label className="block text-xs font-bold text-slate-700 mb-1">Transport Tax-Exempt Cap (ETB)</label>
                       <input
                         type="number"
+                        data-field="transportCap"
                         value={transportCap}
-                        onChange={(e) => setTransportCap(Number(e.target.value))}
+                        onChange={(e) => {
+                          setTransportCap(Number(e.target.value));
+                          setTaxErrors(prev => ({ ...prev, transportCap: "" }));
+                        }}
                         readOnly={!canEdit}
-                        className="w-full px-3 py-1.5 border rounded-lg text-xs font-bold"
-                        required
+                        className={fieldInputClass(Boolean(taxErrors.transportCap), "w-full px-3 py-1.5 border rounded-lg text-xs font-bold")}
                       />
+                      <FormFieldError error={taxErrors.transportCap} />
                       <span className="text-[10px] text-slate-400">Max tax-exempt transport allowance</span>
                     </div>
                   </div>
@@ -2214,9 +2492,27 @@ export default function PayrollManagement({
                               {canDelete && (
                                 <button
                                   onClick={() => {
-                                    if (window.confirm(`Are you sure you want to permanently delete payroll period ${p.periodName}?`)) {
-                                      onDeletePeriod && onDeletePeriod(p.id);
-                                    }
+                                    setConfirmAction({
+                                      title: "Delete Payroll Period",
+                                      message: (
+                                        <span>
+                                          Are you sure you want to permanently delete payroll period{" "}
+                                          <strong className="text-slate-900">{p.periodName}</strong>?
+                                          This action cannot be undone.
+                                        </span>
+                                      ),
+                                      confirmText: "Delete Period",
+                                      variant: "danger",
+                                      onConfirm: () => {
+                                        if (onDeletePeriod) {
+                                          const ok = onDeletePeriod(p.id);
+                                          if (ok !== false) {
+                                            toast.showSuccess(`Payroll period "${p.periodName}" deleted.`);
+                                          }
+                                        }
+                                        setConfirmAction(null);
+                                      },
+                                    });
                                   }}
                                   className="p-1 text-slate-400 hover:text-rose-700 hover:bg-rose-50 rounded"
                                   title="Delete Period"
@@ -2269,7 +2565,11 @@ export default function PayrollManagement({
 
             {canEdit && (
               <button
-                onClick={() => setBulkSalaryModalOpen(true)}
+                onClick={() => {
+                  setBulkErrors({});
+                  setBulkSummary("");
+                  setBulkSalaryModalOpen(true);
+                }}
                 className="px-3.5 py-1.5 bg-amber-500 hover:bg-amber-600 text-slate-900 text-xs font-bold rounded-lg transition-all flex items-center gap-1.5 shadow-2xs"
               >
                 <Sliders className="h-3.5 w-3.5" /> Bulk Salary Adjustment
@@ -2457,9 +2757,26 @@ export default function PayrollManagement({
                           {canDelete && (
                             <button
                               onClick={() => {
-                                if (window.confirm(`Are you sure you want to delete this payroll record for ${r.employeeName}?`)) {
-                                  onDeleteRecord && onDeleteRecord(r.id);
-                                }
+                                setConfirmAction({
+                                  title: "Delete Payroll Record",
+                                  message: (
+                                    <span>
+                                      Are you sure you want to delete this payroll record for{" "}
+                                      <strong className="text-slate-900">{r.employeeName}</strong>?
+                                    </span>
+                                  ),
+                                  confirmText: "Delete Record",
+                                  variant: "danger",
+                                  onConfirm: () => {
+                                    if (onDeleteRecord) {
+                                      const ok = onDeleteRecord(r.id);
+                                      if (ok !== false) {
+                                        toast.showSuccess(`Payroll record for ${r.employeeName} deleted.`);
+                                      }
+                                    }
+                                    setConfirmAction(null);
+                                  },
+                                });
                               }}
                               className="p-1 text-slate-400 hover:text-rose-700 hover:bg-rose-50 rounded inline-block"
                               title="Delete Record"
@@ -2523,13 +2840,20 @@ export default function PayrollManagement({
             {canApprove && selectedPeriod.status !== "Approved" && (
               <div className="p-4 bg-amber-50 border border-amber-200 rounded-xl space-y-3">
                 <h4 className="text-xs font-bold text-amber-900">Executive Approval Authorization</h4>
-                <textarea
-                  rows={2}
-                  placeholder="Enter approval or audit comments..."
-                  value={approvalComments}
-                  onChange={(e) => setApprovalComments(e.target.value)}
-                  className="w-full text-xs p-2.5 border rounded-lg bg-white"
-                />
+                <div>
+                  <textarea
+                    rows={2}
+                    data-field="approvalComments"
+                    placeholder="Enter approval or audit comments (required when rejecting)..."
+                    value={approvalComments}
+                    onChange={(e) => {
+                      setApprovalComments(e.target.value);
+                      setApprovalCommentError("");
+                    }}
+                    className={fieldInputClass(Boolean(approvalCommentError), "w-full text-xs p-2.5 border rounded-lg bg-white")}
+                  />
+                  <FormFieldError error={approvalCommentError} />
+                </div>
                 <div className="flex gap-2 justify-end">
                   <button
                     onClick={handleRejectPayroll}
@@ -2636,9 +2960,27 @@ export default function PayrollManagement({
                           {canDelete && (
                             <button
                               onClick={() => {
-                                if (window.confirm(`Are you sure you want to delete payslip ${ps.payslipRefNo}?`)) {
-                                  onDeletePayslip && onDeletePayslip(ps.id);
-                                }
+                                setConfirmAction({
+                                  title: "Delete Payslip",
+                                  message: (
+                                    <span>
+                                      Are you sure you want to delete payslip{" "}
+                                      <strong className="text-slate-900">{ps.payslipRefNo}</strong> for{" "}
+                                      <strong className="text-slate-900">{ps.employeeName}</strong>?
+                                    </span>
+                                  ),
+                                  confirmText: "Delete Payslip",
+                                  variant: "danger",
+                                  onConfirm: () => {
+                                    if (onDeletePayslip) {
+                                      const ok = onDeletePayslip(ps.id);
+                                      if (ok !== false) {
+                                        toast.showSuccess(`Payslip ${ps.payslipRefNo} deleted.`);
+                                      }
+                                    }
+                                    setConfirmAction(null);
+                                  },
+                                });
                               }}
                               className="p-1 text-slate-400 hover:text-rose-700 hover:bg-rose-50 rounded inline-block"
                               title="Delete Payslip"
@@ -2690,6 +3032,11 @@ export default function PayrollManagement({
                   onChange={handleFileUpload}
                   className="block mx-auto text-xs text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-xs file:font-bold file:bg-primary-custom file:text-white hover:file:opacity-95"
                 />
+                {csvUploadError && (
+                  <div className="max-w-md mx-auto text-left">
+                    <FormFieldError error={csvUploadError} />
+                  </div>
+                )}
               </div>
             ) : (
               <div className="p-4 bg-amber-50 border border-amber-200 text-amber-800 rounded-xl text-xs font-semibold">
@@ -3043,17 +3390,22 @@ export default function PayrollManagement({
               </button>
             </div>
 
-            <form onSubmit={handleSaveComponent} className="p-5 space-y-3 text-xs">
+            <form onSubmit={handleSaveComponent} noValidate className="p-5 space-y-3 text-xs">
+              <ValidationSummary message={compSummary} errors={compErrors} />
               <div>
                 <label className="block font-bold text-slate-700 mb-1">Component Name *</label>
                 <input
                   type="text"
+                  data-field="compName"
                   placeholder="e.g. Hardship Allowance"
                   value={compName}
-                  onChange={(e) => setCompName(e.target.value)}
-                  className="w-full px-3 py-1.5 border rounded-lg"
-                  required
+                  onChange={(e) => {
+                    setCompName(e.target.value);
+                    setCompErrors(prev => ({ ...prev, compName: "" }));
+                  }}
+                  className={fieldInputClass(Boolean(compErrors.compName), "w-full px-3 py-1.5 border rounded-lg")}
                 />
+                <FormFieldError error={compErrors.compName} />
               </div>
 
               <div className="grid grid-cols-2 gap-3">
@@ -3061,12 +3413,16 @@ export default function PayrollManagement({
                   <label className="block font-bold text-slate-700 mb-1">Code *</label>
                   <input
                     type="text"
+                    data-field="compCode"
                     placeholder="HA"
                     value={compCode}
-                    onChange={(e) => setCompCode(e.target.value)}
-                    className="w-full px-3 py-1.5 border rounded-lg font-mono uppercase"
-                    required
+                    onChange={(e) => {
+                      setCompCode(e.target.value);
+                      setCompErrors(prev => ({ ...prev, compCode: "" }));
+                    }}
+                    className={fieldInputClass(Boolean(compErrors.compCode), "w-full px-3 py-1.5 border rounded-lg font-mono uppercase")}
                   />
+                  <FormFieldError error={compErrors.compCode} />
                 </div>
                 <div>
                   <label className="block font-bold text-slate-700 mb-1">Type *</label>
@@ -3085,7 +3441,10 @@ export default function PayrollManagement({
                 <label className="block font-bold text-slate-700 mb-1">Calculation Method</label>
                 <select
                   value={compMethod}
-                  onChange={(e) => setCompMethod(e.target.value as any)}
+                  onChange={(e) => {
+                    setCompMethod(e.target.value as any);
+                    setCompErrors(prev => ({ ...prev, compValue: "" }));
+                  }}
                   className="w-full px-3 py-1.5 border rounded-lg font-semibold"
                 >
                   <option value="Fixed Amount">Fixed Amount</option>
@@ -3093,6 +3452,8 @@ export default function PayrollManagement({
                   <option value="Based on Basic Salary">Based on Basic Salary</option>
                   <option value="Formula-Based">Formula-Based</option>
                 </select>
+                <FormFieldError error={compErrors.compValue} />
+                <FormFieldError error={compErrors.compEffectiveDate} />
               </div>
 
               <div className="flex gap-4 pt-1">
@@ -3135,9 +3496,10 @@ export default function PayrollManagement({
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-1.5 bg-primary-custom text-white font-bold rounded-lg shadow-2xs"
+                  disabled={isSavingComp}
+                  className="px-4 py-1.5 bg-primary-custom text-white font-bold rounded-lg shadow-2xs disabled:opacity-50"
                 >
-                  Save Component
+                  {isSavingComp ? "Saving..." : "Save Component"}
                 </button>
               </div>
             </form>
@@ -3158,17 +3520,22 @@ export default function PayrollManagement({
               </button>
             </div>
 
-            <form onSubmit={handleSavePeriod} className="p-5 space-y-3 text-xs">
+            <form onSubmit={handleSavePeriod} noValidate className="p-5 space-y-3 text-xs">
+              <ValidationSummary message={periodFormSummary} errors={periodErrors} />
               <div>
                 <label className="block font-bold text-slate-700 mb-1">Period Name *</label>
                 <input
                   type="text"
+                  data-field="pName"
                   placeholder="e.g. March 2026"
                   value={pName}
-                  onChange={(e) => setPName(e.target.value)}
-                  className="w-full px-3 py-1.5 border rounded-lg font-bold"
-                  required
+                  onChange={(e) => {
+                    setPName(e.target.value);
+                    setPeriodErrors(prev => ({ ...prev, pName: "" }));
+                  }}
+                  className={fieldInputClass(Boolean(periodErrors.pName), "w-full px-3 py-1.5 border rounded-lg font-bold")}
                 />
+                <FormFieldError error={periodErrors.pName} />
               </div>
 
               <div className="grid grid-cols-2 gap-3">
@@ -3176,33 +3543,45 @@ export default function PayrollManagement({
                   <label className="block font-bold text-slate-700 mb-1">Start Date *</label>
                   <input
                     type="date"
+                    data-field="pStart"
                     value={pStart}
-                    onChange={(e) => setPStart(e.target.value)}
-                    className="w-full px-3 py-1.5 border rounded-lg font-bold"
-                    required
+                    onChange={(e) => {
+                      setPStart(e.target.value);
+                      setPeriodErrors(prev => ({ ...prev, pStart: "", pEnd: "", pPayment: "" }));
+                    }}
+                    className={fieldInputClass(Boolean(periodErrors.pStart), "w-full px-3 py-1.5 border rounded-lg font-bold")}
                   />
+                  <FormFieldError error={periodErrors.pStart} />
                 </div>
                 <div>
                   <label className="block font-bold text-slate-700 mb-1">End Date *</label>
                   <input
                     type="date"
+                    data-field="pEnd"
                     value={pEnd}
-                    onChange={(e) => setPEnd(e.target.value)}
-                    className="w-full px-3 py-1.5 border rounded-lg font-bold"
-                    required
+                    onChange={(e) => {
+                      setPEnd(e.target.value);
+                      setPeriodErrors(prev => ({ ...prev, pEnd: "" }));
+                    }}
+                    className={fieldInputClass(Boolean(periodErrors.pEnd), "w-full px-3 py-1.5 border rounded-lg font-bold")}
                   />
+                  <FormFieldError error={periodErrors.pEnd} />
                 </div>
               </div>
 
               <div>
-                <label className="block font-bold text-slate-700 mb-1">Payment / Disbursement Date</label>
+                <label className="block font-bold text-slate-700 mb-1">Payment / Disbursement Date *</label>
                 <input
                   type="date"
+                  data-field="pPayment"
                   value={pPayment}
-                  onChange={(e) => setPPayment(e.target.value)}
-                  className="w-full px-3 py-1.5 border rounded-lg font-bold"
-                  required
+                  onChange={(e) => {
+                    setPPayment(e.target.value);
+                    setPeriodErrors(prev => ({ ...prev, pPayment: "" }));
+                  }}
+                  className={fieldInputClass(Boolean(periodErrors.pPayment), "w-full px-3 py-1.5 border rounded-lg font-bold")}
                 />
+                <FormFieldError error={periodErrors.pPayment} />
               </div>
 
               <div className="flex justify-end gap-2 pt-3 border-t">
@@ -3215,9 +3594,10 @@ export default function PayrollManagement({
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-1.5 bg-primary-custom text-white font-bold rounded-lg shadow-2xs"
+                  disabled={isSavingPeriod}
+                  className="px-4 py-1.5 bg-primary-custom text-white font-bold rounded-lg shadow-2xs disabled:opacity-50"
                 >
-                  Create Period
+                  {isSavingPeriod ? "Creating..." : "Create Period"}
                 </button>
               </div>
             </form>
@@ -3241,17 +3621,22 @@ export default function PayrollManagement({
               </button>
             </div>
 
-            <form onSubmit={handleSaveSalarySetup} className="p-5 space-y-4 text-xs">
+            <form onSubmit={handleSaveSalarySetup} noValidate className="p-5 space-y-4 text-xs">
+              <ValidationSummary message={salarySummary} errors={salaryErrors} />
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block font-bold text-slate-700 mb-1">Basic Salary (ETB) *</label>
                   <input
                     type="number"
+                    data-field="structBasic"
                     value={structBasic}
-                    onChange={(e) => setStructBasic(Number(e.target.value))}
-                    className="w-full px-3 py-1.5 border rounded-lg font-bold"
-                    required
+                    onChange={(e) => {
+                      setStructBasic(Number(e.target.value));
+                      setSalaryErrors(prev => ({ ...prev, structBasic: "" }));
+                    }}
+                    className={fieldInputClass(Boolean(salaryErrors.structBasic), "w-full px-3 py-1.5 border rounded-lg font-bold")}
                   />
+                  <FormFieldError error={salaryErrors.structBasic} />
                 </div>
                 <div>
                   <label className="block font-bold text-slate-700 mb-1">Salary Grade / Step</label>
@@ -3270,28 +3655,43 @@ export default function PayrollManagement({
                   <label className="block font-bold text-slate-700 mb-1">Position Allowance</label>
                   <input
                     type="number"
+                    data-field="structPos"
                     value={structPosition}
-                    onChange={(e) => setStructPosition(Number(e.target.value))}
-                    className="w-full px-3 py-1.5 border rounded-lg font-semibold"
+                    onChange={(e) => {
+                      setStructPosition(Number(e.target.value));
+                      setSalaryErrors(prev => ({ ...prev, structPos: "" }));
+                    }}
+                    className={fieldInputClass(Boolean(salaryErrors.structPos), "w-full px-3 py-1.5 border rounded-lg font-semibold")}
                   />
+                  <FormFieldError error={salaryErrors.structPos} />
                 </div>
                 <div>
                   <label className="block font-bold text-slate-700 mb-1">Transport Allowance</label>
                   <input
                     type="number"
+                    data-field="structTrans"
                     value={structTransport}
-                    onChange={(e) => setStructTransport(Number(e.target.value))}
-                    className="w-full px-3 py-1.5 border rounded-lg font-semibold"
+                    onChange={(e) => {
+                      setStructTransport(Number(e.target.value));
+                      setSalaryErrors(prev => ({ ...prev, structTrans: "" }));
+                    }}
+                    className={fieldInputClass(Boolean(salaryErrors.structTrans), "w-full px-3 py-1.5 border rounded-lg font-semibold")}
                   />
+                  <FormFieldError error={salaryErrors.structTrans} />
                 </div>
                 <div>
                   <label className="block font-bold text-slate-700 mb-1">Housing Allowance</label>
                   <input
                     type="number"
+                    data-field="structHouse"
                     value={structHousing}
-                    onChange={(e) => setStructHousing(Number(e.target.value))}
-                    className="w-full px-3 py-1.5 border rounded-lg font-semibold"
+                    onChange={(e) => {
+                      setStructHousing(Number(e.target.value));
+                      setSalaryErrors(prev => ({ ...prev, structHouse: "" }));
+                    }}
+                    className={fieldInputClass(Boolean(salaryErrors.structHouse), "w-full px-3 py-1.5 border rounded-lg font-semibold")}
                   />
+                  <FormFieldError error={salaryErrors.structHouse} />
                 </div>
               </div>
 
@@ -3300,20 +3700,29 @@ export default function PayrollManagement({
                   <label className="block font-bold text-slate-700 mb-1">Staff Loan Installment (ETB)</label>
                   <input
                     type="number"
+                    data-field="ded_LOAN"
                     value={structLoanDeduction}
-                    onChange={(e) => setStructLoanDeduction(Number(e.target.value))}
-                    className="w-full px-3 py-1.5 border rounded-lg font-semibold"
+                    onChange={(e) => {
+                      setStructLoanDeduction(Number(e.target.value));
+                      setSalaryErrors(prev => ({ ...prev, ded_LOAN: "" }));
+                    }}
+                    className={fieldInputClass(Boolean(salaryErrors.ded_LOAN), "w-full px-3 py-1.5 border rounded-lg font-semibold")}
                   />
+                  <FormFieldError error={salaryErrors.ded_LOAN} />
                 </div>
                 <div>
                   <label className="block font-bold text-slate-700 mb-1">Effective Date *</label>
                   <input
                     type="date"
+                    data-field="structEffDate"
                     value={structEffectiveDate}
-                    onChange={(e) => setStructEffectiveDate(e.target.value)}
-                    className="w-full px-3 py-1.5 border rounded-lg font-bold"
-                    required
+                    onChange={(e) => {
+                      setStructEffectiveDate(e.target.value);
+                      setSalaryErrors(prev => ({ ...prev, structEffDate: "" }));
+                    }}
+                    className={fieldInputClass(Boolean(salaryErrors.structEffDate), "w-full px-3 py-1.5 border rounded-lg font-bold")}
                   />
+                  <FormFieldError error={salaryErrors.structEffDate} />
                 </div>
               </div>
 
@@ -3350,9 +3759,10 @@ export default function PayrollManagement({
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-1.5 bg-primary-custom text-white font-bold rounded-lg shadow-2xs"
+                  disabled={isSavingSalary}
+                  className="px-4 py-1.5 bg-primary-custom text-white font-bold rounded-lg shadow-2xs disabled:opacity-50"
                 >
-                  Save Salary Structure
+                  {isSavingSalary ? "Saving..." : "Save Salary Structure"}
                 </button>
               </div>
             </form>
@@ -3373,19 +3783,25 @@ export default function PayrollManagement({
               </button>
             </div>
 
-            <div className="p-5 space-y-4 text-xs">
+            <form onSubmit={handleApplyBulkSalaryUpdate} noValidate className="p-5 space-y-4 text-xs">
+              <ValidationSummary message={bulkSummary} errors={bulkErrors} />
               <div>
                 <label className="block font-bold text-slate-700 mb-1">Target Department</label>
                 <select
+                  data-field="bulkDept"
                   value={bulkDept}
-                  onChange={(e) => setBulkDept(e.target.value)}
-                  className="w-full p-2 border rounded-lg font-semibold bg-white"
+                  onChange={(e) => {
+                    setBulkDept(e.target.value);
+                    setBulkErrors(prev => ({ ...prev, bulkDept: "" }));
+                  }}
+                  className={fieldInputClass(Boolean(bulkErrors.bulkDept), "w-full p-2 border rounded-lg font-semibold bg-white")}
                 >
                   <option value="">All Departments ({activeEmployees.length} Staff)</option>
                   {departments.map(d => (
                     <option key={d.id} value={d.id}>{d.name}</option>
                   ))}
                 </select>
+                <FormFieldError error={bulkErrors.bulkDept} />
               </div>
 
               <div className="grid grid-cols-2 gap-3">
@@ -3393,7 +3809,10 @@ export default function PayrollManagement({
                   <label className="block font-bold text-slate-700 mb-1">Adjustment Type</label>
                   <select
                     value={bulkType}
-                    onChange={(e) => setBulkType(e.target.value as any)}
+                    onChange={(e) => {
+                      setBulkType(e.target.value as any);
+                      setBulkErrors(prev => ({ ...prev, bulkValue: "" }));
+                    }}
                     className="w-full p-2 border rounded-lg font-bold bg-white"
                   >
                     <option value="Percentage">Percentage (%) Increase</option>
@@ -3405,10 +3824,15 @@ export default function PayrollManagement({
                   <label className="block font-bold text-slate-700 mb-1">Value *</label>
                   <input
                     type="number"
+                    data-field="bulkValue"
                     value={bulkValue}
-                    onChange={(e) => setBulkValue(Number(e.target.value))}
-                    className="w-full p-2 border rounded-lg font-bold"
+                    onChange={(e) => {
+                      setBulkValue(Number(e.target.value));
+                      setBulkErrors(prev => ({ ...prev, bulkValue: "" }));
+                    }}
+                    className={fieldInputClass(Boolean(bulkErrors.bulkValue), "w-full p-2 border rounded-lg font-bold")}
                   />
+                  <FormFieldError error={bulkErrors.bulkValue} />
                 </div>
               </div>
 
@@ -3421,14 +3845,14 @@ export default function PayrollManagement({
                   Cancel
                 </button>
                 <button
-                  type="button"
-                  onClick={handleApplyBulkSalaryUpdate}
-                  className="px-4 py-1.5 bg-amber-500 hover:bg-amber-600 text-slate-900 font-extrabold rounded-lg shadow-2xs"
+                  type="submit"
+                  disabled={isApplyingBulk}
+                  className="px-4 py-1.5 bg-amber-500 hover:bg-amber-600 text-slate-900 font-extrabold rounded-lg shadow-2xs disabled:opacity-50"
                 >
-                  Apply Bulk Adjustment
+                  {isApplyingBulk ? "Applying..." : "Apply Bulk Adjustment"}
                 </button>
               </div>
-            </div>
+            </form>
           </div>
         </div>
       )}
@@ -3594,6 +4018,16 @@ export default function PayrollManagement({
           </div>
         </div>
       )}
+
+      <ConfirmDialog
+        isOpen={Boolean(confirmAction)}
+        title={confirmAction?.title || "Confirm Action"}
+        message={confirmAction?.message || ""}
+        confirmText={confirmAction?.confirmText || "Confirm"}
+        variant={confirmAction?.variant || "danger"}
+        onConfirm={() => confirmAction?.onConfirm()}
+        onCancel={() => setConfirmAction(null)}
+      />
     </div>
   );
 }

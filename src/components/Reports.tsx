@@ -60,13 +60,13 @@ export default function Reports({
   }, [initialSubTab]);
 
   // --- Role-based data scoping ---
-  const isEmployee = currentUser?.role === "Employee";
-  const isDeptHead = currentUser?.role === "Department Head";
+  const isEmployee = currentUser?.role === "Employee" || permissions?.dataScope === "own";
+  const isDeptHead = currentUser?.role === "Department Head" || permissions?.dataScope === "team";
   const managedDeptIds = isDeptHead ? getDepartmentHeadManagedDeptIds(currentUser, departments, employees) : [];
   const myEmpId = currentUser?.employeeId;
 
   const scopedEmployees = employees.filter(emp => {
-    if (isEmployee) return emp.employeeId === myEmpId || emp.email.toLowerCase() === currentUser?.email.toLowerCase();
+    if (isEmployee) return (myEmpId && emp.employeeId === myEmpId) || emp.email.toLowerCase() === currentUser?.email.toLowerCase();
     if (isDeptHead && managedDeptIds.length > 0) return managedDeptIds.includes(emp.departmentId);
     return true;
   });

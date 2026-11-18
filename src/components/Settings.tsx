@@ -1,14 +1,25 @@
 import React, { useState, useEffect } from "react";
-import { CompanyConfig, User, PublicHoliday, UserRole, AccountStatus, Employee, EmailActivityLog, SystemRole, RolePermissions, ModulePermission } from "../types";
+import { CompanyConfig, User, PublicHoliday, UserRole, AccountStatus, Employee, EmailActivityLog, SystemRole, RolePermissions, ModulePermission, ModulePermissionOverride, ActionPermissions } from "../types";
 import { 
   Building, Palette, Calendar, ShieldCheck, Users2, Plus, Edit, 
-  Trash2, X, Save, CheckCircle2, UserCheck, UserMinus, Eye, Mail, Upload, RefreshCw, AlertCircle
+  Trash2, X, Save, CheckCircle2, UserCheck, UserMinus, Eye, Mail, Upload, RefreshCw, AlertCircle, SlidersHorizontal, RotateCcw
 } from "lucide-react";
 import RoleMatrix from "./RoleMatrix";
+import { APP_MODULES, EMPLOYEE_BLOCKED_ADMIN_MODULES, getModuleLabelForRole, getModuleSubmenusForRole } from "../config/permissions";
+import { resolveUserPermissions } from "../utils/rbacUtils";
 import { uploadFileToStorage, deleteFileFromStorage } from "../firebase";
 import ReportPrintButton from "./reports/ReportPrintButton";
 import ReportPDFExportButton from "./reports/ReportPDFExportButton";
 import { formatReportDateTime, ReportExportPayload } from "../utils/reportBranding";
+import {
+  validateCompanyProfileForm,
+  validateHolidayForm,
+  validateUserAccountForm,
+  validateDocumentUpload,
+  focusFirstInvalidField
+} from "../utils/validation";
+import { FormFieldError, ValidationSummary, fieldInputClass } from "./ui/FormFeedback";
+import { useToast, ConfirmDialog } from "./ui/ToastProvider";
 
 interface SettingsProps {
   config: CompanyConfig;
@@ -111,6 +122,8 @@ export default function Settings({
   const [editUserMode, setEditUserMode] = useState(false);
   const [selectedUser, setSelectedUser] = useState<User | null>(null);
   const [viewingUser, setViewingUser] = useState<User | null>(null);
+  const [overrideUser, setOverrideUser] = useState<User | null>(null);
+  const [draftOverrides, setDraftOverrides] = useState<{ [moduleId: string]: ModulePermissionOverride }>({});
 
   // User Form fields
   const [userFullName, setUserFullName] = useState("");
@@ -121,12 +134,68 @@ export default function Settings({
   const [userEmailVerified, setUserEmailVerified] = useState(false);
   const [userEmployeeId, setUserEmployeeId] = useState("");
 
+  const toast = useToast();
   const [formError, setFormError] = useState("");
   const [formSuccess, setFormSuccess] = useState("");
+  const [profileErrors, setProfileErrors] = useState<Record<string, string>>({});
+  const [holErrors, setHolErrors] = useState<Record<string, string>>({});
+  const [userFieldErrors, setUserFieldErrors] = useState<Record<string, string>>({});
+  const [isSavingUser, setIsSavingUser] = useState(false);
+
+  const [confirmState, setConfirmState] = useState<{
+    isOpen: boolean;
+    title: string;
+    message: React.ReactNode;
+    confirmText: string;
+    variant: "danger" | "warning" | "primary";
+    onConfirm: () => void;
+  } | null>(null);
+
+  const clearProfileError = (key: string) => {
+    setProfileErrors((prev) => {
+      if (!prev[key]) return prev;
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+  };
+
+  const clearHolError = (key: string) => {
+    setHolErrors((prev) => {
+      if (!prev[key]) return prev;
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+  };
+
+  const clearUserFieldError = (key: string) => {
+    setUserFieldErrors((prev) => {
+      if (!prev[key]) return prev;
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+  };
 
   // Save Company Profile
-  const handleSaveProfile = (e: React.FormEvent) => {
+  const handleSaveProfile = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
+    const validation = validateCompanyProfileForm({
+      displayName,
+      legalName,
+      shortName,
+      email: companyEmail,
+      website: companyWebsite
+    });
+    if (!validation.valid) {
+      setProfileErrors(validation.errors);
+      focusFirstInvalidField(validation.errors, e.currentTarget);
+      toast.showWarning(validation.summaryMessage || "Please correct highlighted profile fields.", "Validation Error");
+      return;
+    }
+    setProfileErrors({});
+
     const updatedConfig: CompanyConfig = {
       ...config,
       profile: {
@@ -145,12 +214,18 @@ export default function Settings({
     };
     onUpdateConfig(updatedConfig);
     onLogAction("Settings", "Company Profile Updated", "CompanyProfile", "Saved legal description and contact details");
-    alert("Company profile updated successfully.");
+    toast.showSuccess("Company profile updated successfully.", "Profile Saved");
   };
 
   // Save Branding Theme Settings
   const handleSaveBranding = (e: React.FormEvent) => {
     e.preventDefault();
+    const isHex = (c: string) => /^#[0-9A-Fa-f]{6}$/.test((c || "").trim());
+    if (!isHex(primaryColor) || !isHex(secondaryColor) || !isHex(accentColor)) {
+      toast.showError("Brand colors must be valid 6-digit hex codes (e.g. #0F2942).", "Invalid Color Format");
+      return;
+    }
+
     const updatedConfig: CompanyConfig = {
       ...config,
       branding: {
@@ -161,13 +236,14 @@ export default function Settings({
     };
     onUpdateConfig(updatedConfig);
     onLogAction("Settings", "Branding Updated", "BrandingColors", `Changed primary hex color to: ${primaryColor}`);
-    alert("Branding configuration saved! Theme applied dynamically.");
+    toast.showSuccess("Branding configuration saved! Theme applied dynamically.", "Branding Applied");
   };
 
   const handleResetBranding = () => {
     setPrimaryColor("#0F2942");
     setSecondaryColor("#1D4E7B");
     setAccentColor("#D4AF37");
+    toast.showInfo("Default Ethiopian Reinsurance color tokens loaded. Click Apply Branding to save.", "Defaults Loaded");
   };
 
   // Upload Logo to Firebase Storage (branding/) and persist download URL
@@ -178,8 +254,15 @@ export default function Settings({
     setLogoUploadError("");
     setLogoUploadSuccess("");
 
-    if (file.size > 1024 * 1024) {
-      setLogoUploadError("Logo file exceeds the 1MB maximum size limit.");
+    const fileCheck = validateDocumentUpload(file, {
+      maxSizeMB: 1,
+      allowedExtensions: ["png", "jpg", "jpeg", "webp", "svg"]
+    });
+    if (!fileCheck.valid) {
+      const msg = fileCheck.error || "Invalid logo file.";
+      setLogoUploadError(msg);
+      toast.showError(msg, "Logo Validation Error");
+      e.target.value = "";
       return;
     }
 
@@ -197,8 +280,11 @@ export default function Settings({
       onUpdateConfig(updatedConfig);
       onLogAction("Settings", "Logo Uploaded", "CompanyLogo", `Uploaded logo '${file.name}' to Firebase Storage`);
       setLogoUploadSuccess("Logo uploaded to Firebase Storage and saved.");
+      toast.showSuccess("Company logo uploaded and saved.", "Logo Updated");
     } catch (err: any) {
-      setLogoUploadError(err?.message || "Failed to upload logo to Firebase Storage.");
+      const msg = err?.message || "Failed to upload logo to Firebase Storage.";
+      setLogoUploadError(msg);
+      toast.showError(msg, "Upload Failed");
     } finally {
       setLogoUploading(false);
       e.target.value = "";
@@ -224,18 +310,20 @@ export default function Settings({
         logoUrl: ""
       }
     });
+    toast.showInfo("Custom company logo removed. Default emblem restored.", "Logo Removed");
   };
 
   // Add Public Holiday
-  const handleAddHoliday = (e: React.FormEvent) => {
+  const handleAddHoliday = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    if (!holidayName.trim() || !holidayDate) return;
-
-    const exists = holidays.some(h => h.date === holidayDate);
-    if (exists) {
-      alert("A public holiday is already registered on this date.");
+    const validation = validateHolidayForm({ name: holidayName, date: holidayDate }, holidays);
+    if (!validation.valid) {
+      setHolErrors(validation.errors);
+      focusFirstInvalidField(validation.errors, e.currentTarget);
+      toast.showWarning(validation.summaryMessage || "Please check the holiday details.", "Validation Error");
       return;
     }
+    setHolErrors({});
 
     const newH: PublicHoliday = {
       id: `H_${Date.now()}`,
@@ -246,20 +334,34 @@ export default function Settings({
     const updated = [...holidays, newH].sort((a, b) => a.date.localeCompare(b.date));
     onUpdateHolidays(updated);
     onLogAction("Settings", "Public Holiday Created", newH.name, `Added holiday on date ${newH.date}`);
+    toast.showSuccess(`Added public holiday "${newH.name}" (${newH.date}).`, "Holiday Added");
     setHolidayName("");
     setHolidayDate("");
   };
 
   const handleDeleteHoliday = (id: string, name: string) => {
-    if (window.confirm(`Permanently remove public holiday: ${name}?`)) {
-      if (onDeleteHoliday) {
-        onDeleteHoliday(id);
-      } else {
-        const updated = holidays.filter(h => h.id !== id);
-        onUpdateHolidays(updated);
+    setConfirmState({
+      isOpen: true,
+      title: "Delete Public Holiday",
+      message: (
+        <span>
+          Permanently remove public holiday <strong>{name}</strong>? Leave duration calculations will no longer exclude this date.
+        </span>
+      ),
+      confirmText: "Remove Holiday",
+      variant: "danger",
+      onConfirm: () => {
+        if (onDeleteHoliday) {
+          onDeleteHoliday(id);
+        } else {
+          const updated = holidays.filter(h => h.id !== id);
+          onUpdateHolidays(updated);
+        }
+        onLogAction("Settings", "Public Holiday Deleted", name, `Removed public holiday date`);
+        toast.showSuccess(`Removed public holiday "${name}".`, "Holiday Removed");
+        setConfirmState(null);
       }
-      onLogAction("Settings", "Public Holiday Deleted", name, `Removed public holiday date`);
-    }
+    });
   };
 
   // --- User Management CRUD ---
@@ -274,6 +376,7 @@ export default function Settings({
     setUserEmployeeId("");
     setFormError("");
     setFormSuccess("");
+    setUserFieldErrors({});
     setEditUserMode(false);
     setUserModalOpen(true);
   };
@@ -289,54 +392,42 @@ export default function Settings({
     setUserEmployeeId(u.employeeId || "");
     setFormError("");
     setFormSuccess("");
+    setUserFieldErrors({});
     setEditUserMode(true);
     setUserModalOpen(true);
   };
 
-  const handleUserSubmit = (e: React.FormEvent) => {
+  const handleUserSubmit = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
+    if (isSavingUser) return;
     setFormError("");
     setFormSuccess("");
 
-    if (!userFullName.trim() || !userEmail.trim()) {
-      setFormError("Full Name and Email are required.");
+    const validation = validateUserAccountForm({
+      editingUser: editUserMode ? selectedUser : null,
+      fullName: userFullName,
+      email: userEmail,
+      password: userPassword,
+      role: userRole,
+      status: userStatus,
+      employeeId: userEmployeeId,
+      existingUsers: users,
+      roles,
+      currentUser
+    });
+
+    if (!validation.valid) {
+      setUserFieldErrors(validation.errors);
+      setFormError(validation.summaryMessage || "Please correct the highlighted fields.");
+      focusFirstInvalidField(validation.errors, e.currentTarget);
       return;
     }
 
+    setUserFieldErrors({});
+    setIsSavingUser(true);
     const emailNormalized = userEmail.trim().toLowerCase();
 
-    // 1. Domain verification for email (with special exception contactesfaye@gmail.com)
-    if (emailNormalized !== "contactesfaye@gmail.com" && !emailNormalized.endsWith("@ethiopianre.com")) {
-      setFormError("Only users with an @ethiopianre.com company email address are allowed to register.");
-      return;
-    }
-
     if (editUserMode && selectedUser) {
-      // Edit User mode
-      // Check duplicate email
-      const isDuplicate = users.some(u => u.id !== selectedUser.id && u.email.toLowerCase() === emailNormalized);
-      if (isDuplicate) {
-        setFormError("A user with this email address already exists.");
-        return;
-      }
-
-      // Self-role modification safeguard
-      if (selectedUser.id === currentUser?.id && userRole !== selectedUser.role) {
-        setFormError("Safeguard: You cannot change the assigned role of your own active account.");
-        return;
-      }
-
-      // Last active Admin Safeguard
-      if (selectedUser.role === "Administrator" && selectedUser.status === "Active") {
-        const activeAdminsCount = users.filter(u => u.role === "Administrator" && u.status === "Active").length;
-        const isDowngradingRole = userRole !== "Administrator";
-        const isDeactivatingStatus = userStatus !== "Active";
-        if ((isDowngradingRole || isDeactivatingStatus) && activeAdminsCount <= 1) {
-          setFormError("Safeguard: You cannot deactivate or downgrade this account. The system must always have at least one active Administrator account.");
-          return;
-        }
-      }
-
       const roleChanged = selectedUser.role !== userRole;
       const updatedUsers = users.map(u => {
         if (u.id === selectedUser.id) {
@@ -348,7 +439,6 @@ export default function Settings({
             status: userStatus,
             emailVerified: userEmailVerified,
             employeeId: userEmployeeId || undefined,
-            // Only update password if a new one is typed
             ...(userPassword.trim() ? { password: userPassword.trim() } : {})
           };
         }
@@ -357,7 +447,9 @@ export default function Settings({
 
       const updatedUser = updatedUsers.find(u => u.id === selectedUser.id);
       onUpdateUsers(updatedUsers, updatedUser);
+      setIsSavingUser(false);
       setFormSuccess("User updated successfully!");
+      toast.showSuccess(`Updated account for ${userFullName.trim()} (${userRole}).`, "User Updated");
       onLogAction(
         "Users",
         roleChanged ? "Assign Role" : "User Updated",
@@ -366,22 +458,8 @@ export default function Settings({
           ? `Changed role for ${userFullName} (${emailNormalized}) from "${selectedUser.role}" to "${userRole}"`
           : `Modified account details for ${userFullName}`
       );
-      setTimeout(() => setUserModalOpen(false), 1000);
-
+      setUserModalOpen(false);
     } else {
-      // Add User mode
-      if (!userPassword.trim()) {
-        setFormError("Password is required for new accounts.");
-        return;
-      }
-
-      // Check duplicate
-      const isDuplicate = users.some(u => u.email.toLowerCase() === emailNormalized);
-      if (isDuplicate) {
-        setFormError("A user with this email address is already registered.");
-        return;
-      }
-
       const newUser: User = {
         id: `U_${Date.now()}`,
         fullName: userFullName.trim(),
@@ -396,41 +474,55 @@ export default function Settings({
 
       const updatedUsers = [...users, newUser];
       onUpdateUsers(updatedUsers, newUser);
+      setIsSavingUser(false);
       setFormSuccess("User account created successfully!");
+      toast.showSuccess(`Created user account for ${newUser.fullName} (${newUser.role}).`, "User Created");
       onLogAction("Users", "User Created", emailNormalized, `Enrolled user role ${userRole} under email ${emailNormalized}`);
-      setTimeout(() => setUserModalOpen(false), 1000);
+      setUserModalOpen(false);
     }
   };
 
   const handleDeleteUser = (u: User) => {
     if (u.id === currentUser?.id) {
-      alert("Self-Deletion Safeguard: You cannot delete your own active administrative session!");
+      toast.showError("Self-Deletion Safeguard: You cannot delete your own active administrative session.", "Action Blocked");
       return;
     }
 
     if (u.role === "Administrator" && u.status === "Active") {
       const activeAdminsCount = users.filter(usr => usr.role === "Administrator" && usr.status === "Active").length;
       if (activeAdminsCount <= 1) {
-        alert("Safeguard: You cannot delete this account. The system must always have at least one active Administrator account.");
+        toast.showError("Safeguard: You cannot delete the last active Administrator account in the system.", "Action Blocked");
         return;
       }
     }
 
-    const confirmCheck = window.confirm(`Are you absolutely sure you want to permanently delete user account: ${u.fullName} (${u.email})?`);
-    if (confirmCheck) {
-      if (onDeleteUser) {
-        onDeleteUser(u.id);
-      } else {
-        const updated = users.filter(usr => usr.id !== u.id);
-        onUpdateUsers(updated);
+    setConfirmState({
+      isOpen: true,
+      title: "Delete User Account",
+      message: (
+        <span>
+          Are you sure you want to permanently delete portal account <strong>{u.fullName}</strong> ({u.email})?
+        </span>
+      ),
+      confirmText: "Delete User",
+      variant: "danger",
+      onConfirm: () => {
+        if (onDeleteUser) {
+          onDeleteUser(u.id);
+        } else {
+          const updated = users.filter(usr => usr.id !== u.id);
+          onUpdateUsers(updated);
+        }
+        onLogAction("Users", "User Deleted", u.email, `Permanently deleted user account: ${u.fullName}`);
+        toast.showSuccess(`Deleted user account ${u.email}.`, "User Deleted");
+        setConfirmState(null);
       }
-      onLogAction("Users", "User Deleted", u.email, `Permanently deleted user account: ${u.fullName}`);
-    }
+    });
   };
 
   const handleToggleUserStatus = (u: User) => {
     if (u.id === currentUser?.id) {
-      alert("Self-Deactivation Safeguard: You cannot deactivate your own administrative session!");
+      toast.showError("Self-Deactivation Safeguard: You cannot deactivate your own active administrative session.", "Action Blocked");
       return;
     }
 
@@ -439,14 +531,13 @@ export default function Settings({
     if (u.role === "Administrator" && u.status === "Active" && nextStatus !== "Active") {
       const activeAdminsCount = users.filter(usr => usr.role === "Administrator" && usr.status === "Active").length;
       if (activeAdminsCount <= 1) {
-        alert("Safeguard: You cannot deactivate this account. The system must always have at least one active Administrator account.");
+        toast.showError("Safeguard: The system must always retain at least one active Administrator account.", "Action Blocked");
         return;
       }
     }
 
     const updated = users.map(usr => {
       if (usr.id === u.id) {
-        // If activating, we can also ensure verified
         const autoVerify = nextStatus === "Active" ? true : usr.emailVerified;
         return { ...usr, status: nextStatus as any, emailVerified: autoVerify };
       }
@@ -455,6 +546,7 @@ export default function Settings({
     const toggledUser = updated.find(usr => usr.id === u.id);
     onUpdateUsers(updated, toggledUser);
     onLogAction("Users", nextStatus === "Active" ? "User Activated" : "User Deactivated", u.email, `Set status of user to ${nextStatus}`);
+    toast.showInfo(`${u.fullName} account is now ${nextStatus}.`, "Account Status Updated");
   };
 
   return (
@@ -486,41 +578,56 @@ export default function Settings({
         
         {/* TAB 1: COMPANY PROFILE */}
         {activeSubTab === "profile" && (
-          <form onSubmit={handleSaveProfile} className="space-y-6">
+          <form noValidate onSubmit={handleSaveProfile} className="space-y-6">
             <div>
               <h3 className="font-extrabold text-slate-800 text-base">Company Profile</h3>
               <p className="text-xs text-slate-500 mt-1">Configure physical coordinates and centralized legal identification metadata.</p>
             </div>
+
+            <ValidationSummary errors={profileErrors} />
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <div className="space-y-1">
                 <label className="block text-xs font-bold text-slate-700">Display Brand Name *</label>
                 <input
                   type="text"
+                  data-field="displayName"
                   value={displayName}
-                  onChange={(e) => setDisplayName(e.target.value)}
-                  className="w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom"
-                  required
+                  onChange={(e) => {
+                    setDisplayName(e.target.value);
+                    clearProfileError("displayName");
+                  }}
+                  className={fieldInputClass(!!profileErrors.displayName, "w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom")}
                 />
+                <FormFieldError error={profileErrors.displayName} />
               </div>
               <div className="space-y-1">
                 <label className="block text-xs font-bold text-slate-700">Legal Name *</label>
                 <input
                   type="text"
+                  data-field="legalName"
                   value={legalName}
-                  onChange={(e) => setLegalName(e.target.value)}
-                  className="w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom"
-                  required
+                  onChange={(e) => {
+                    setLegalName(e.target.value);
+                    clearProfileError("legalName");
+                  }}
+                  className={fieldInputClass(!!profileErrors.legalName, "w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom")}
                 />
+                <FormFieldError error={profileErrors.legalName} />
               </div>
               <div className="space-y-1">
-                <label className="block text-xs font-bold text-slate-700">Short Name</label>
+                <label className="block text-xs font-bold text-slate-700">Short Name *</label>
                 <input
                   type="text"
+                  data-field="shortName"
                   value={shortName}
-                  onChange={(e) => setShortName(e.target.value)}
-                  className="w-full px-3 py-2 border rounded-lg text-xs font-semibold ring-primary-custom"
+                  onChange={(e) => {
+                    setShortName(e.target.value);
+                    clearProfileError("shortName");
+                  }}
+                  className={fieldInputClass(!!profileErrors.shortName, "w-full px-3 py-2 border rounded-lg text-xs font-semibold ring-primary-custom")}
                 />
+                <FormFieldError error={profileErrors.shortName} />
               </div>
             </div>
 
@@ -529,10 +636,15 @@ export default function Settings({
                 <label className="block text-xs font-bold text-slate-700">Central Email Address</label>
                 <input
                   type="email"
+                  data-field="companyEmail"
                   value={companyEmail}
-                  onChange={(e) => setCompanyEmail(e.target.value)}
-                  className="w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom"
+                  onChange={(e) => {
+                    setCompanyEmail(e.target.value);
+                    clearProfileError("companyEmail");
+                  }}
+                  className={fieldInputClass(!!profileErrors.companyEmail, "w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom")}
                 />
+                <FormFieldError error={profileErrors.companyEmail} />
               </div>
               <div className="space-y-1">
                 <label className="block text-xs font-bold text-slate-700">Telephone / Fax</label>
@@ -547,10 +659,15 @@ export default function Settings({
                 <label className="block text-xs font-bold text-slate-700">Website URL</label>
                 <input
                   type="text"
+                  data-field="companyWebsite"
                   value={companyWebsite}
-                  onChange={(e) => setCompanyWebsite(e.target.value)}
-                  className="w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom"
+                  onChange={(e) => {
+                    setCompanyWebsite(e.target.value);
+                    clearProfileError("companyWebsite");
+                  }}
+                  className={fieldInputClass(!!profileErrors.companyWebsite, "w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom")}
                 />
+                <FormFieldError error={profileErrors.companyWebsite} />
               </div>
             </div>
 
@@ -819,35 +936,48 @@ export default function Settings({
 
             {/* Add Holiday Inline Form */}
             {canCreate && (
-              <form onSubmit={handleAddHoliday} className="grid grid-cols-1 sm:grid-cols-3 gap-3 p-4 bg-slate-50 rounded-lg border border-slate-100 items-end">
-                <div className="space-y-1">
-                  <label className="block text-xs font-bold text-slate-700">Holiday Name</label>
-                  <input
-                    type="text"
-                    placeholder="e.g. Adwa Victory Day"
-                    value={holidayName}
-                    onChange={(e) => setHolidayName(e.target.value)}
-                    className="w-full px-3 py-2 border rounded-lg text-xs bg-white ring-primary-custom"
-                    required
-                  />
+              <form noValidate onSubmit={handleAddHoliday} className="p-4 bg-slate-50 rounded-lg border border-slate-100 space-y-3">
+                <ValidationSummary errors={holErrors} />
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 items-start">
+                  <div className="space-y-1">
+                    <label className="block text-xs font-bold text-slate-700">Holiday Name *</label>
+                    <input
+                      type="text"
+                      data-field="holName"
+                      placeholder="e.g. Adwa Victory Day"
+                      value={holidayName}
+                      onChange={(e) => {
+                        setHolidayName(e.target.value);
+                        clearHolError("holName");
+                      }}
+                      className={fieldInputClass(!!holErrors.holName, "w-full px-3 py-2 border rounded-lg text-xs bg-white ring-primary-custom")}
+                    />
+                    <FormFieldError error={holErrors.holName} />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="block text-xs font-bold text-slate-700">Holiday Date *</label>
+                    <input
+                      type="date"
+                      data-field="holDate"
+                      value={holidayDate}
+                      onChange={(e) => {
+                        setHolidayDate(e.target.value);
+                        clearHolError("holDate");
+                      }}
+                      className={fieldInputClass(!!holErrors.holDate, "w-full px-3 py-2 border rounded-lg text-xs bg-white ring-primary-custom font-bold")}
+                    />
+                    <FormFieldError error={holErrors.holDate} />
+                  </div>
+                  <div className="sm:pt-5">
+                    <button
+                      type="submit"
+                      className="w-full py-2 bg-primary-custom hover:opacity-95 text-white text-xs font-bold rounded-lg flex items-center justify-center gap-1"
+                    >
+                      <Plus className="h-4 w-4" />
+                      Add Date
+                    </button>
+                  </div>
                 </div>
-                <div className="space-y-1">
-                  <label className="block text-xs font-bold text-slate-700">Holiday Date</label>
-                  <input
-                    type="date"
-                    value={holidayDate}
-                    onChange={(e) => setHolidayDate(e.target.value)}
-                    className="w-full px-3 py-2 border rounded-lg text-xs bg-white ring-primary-custom font-bold"
-                    required
-                  />
-                </div>
-                <button
-                  type="submit"
-                  className="w-full py-2 bg-primary-custom hover:opacity-95 text-white text-xs font-bold rounded-lg flex items-center justify-center gap-1"
-                >
-                  <Plus className="h-4 w-4" />
-                  Add Date
-                </button>
               </form>
             )}
 
@@ -1041,11 +1171,28 @@ export default function Settings({
                                 <Edit className="h-4 w-4" />
                               </button>
                             )}
+                            {canEdit && u.role !== "Administrator" && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setOverrideUser(u);
+                                  setDraftOverrides(JSON.parse(JSON.stringify(u.permissionOverrides || {})));
+                                }}
+                                className={`p-1 rounded-md transition-colors inline-block ${
+                                  u.permissionOverrides && Object.keys(u.permissionOverrides).length > 0
+                                    ? "text-primary-custom bg-blue-50 hover:bg-blue-100"
+                                    : "text-slate-400 hover:text-primary-custom hover:bg-slate-50"
+                                }`}
+                                title="Configure Individual Permission Overrides"
+                              >
+                                <SlidersHorizontal className="h-4 w-4" />
+                              </button>
+                            )}
                             {canEdit && !u.emailVerified && (
                               <button
                                 type="button"
                                 onClick={() => {
-                                  alert(`Verification email link dispatched to ${u.email}.`);
+                                  toast.showInfo(`Verification email link queued for ${u.email}.`, "Verification Sent");
                                   onLogAction("Users", "Resend Verification", u.email, "Dispatched manual email verification link");
                                 }}
                                 className="p-1 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-md transition-colors inline-block"
@@ -1120,12 +1267,8 @@ export default function Settings({
               </button>
             </div>
 
-            <form onSubmit={handleUserSubmit} className="p-5 space-y-4">
-              {formError && (
-                <div className="p-3 bg-rose-50 text-rose-800 border border-rose-200 rounded-lg text-xs font-semibold">
-                  {formError}
-                </div>
-              )}
+            <form noValidate onSubmit={handleUserSubmit} className="p-5 space-y-4 max-h-[82vh] overflow-y-auto">
+              <ValidationSummary errors={userFieldErrors} message={formError} />
               {formSuccess && (
                 <div className="p-3 bg-emerald-50 text-emerald-800 border border-emerald-200 rounded-lg text-xs font-semibold">
                   {formSuccess}
@@ -1136,24 +1279,32 @@ export default function Settings({
                 <label className="block text-xs font-bold text-slate-700">Full Name *</label>
                 <input
                   type="text"
+                  data-field="uName"
                   placeholder="e.g. Martha Teshome"
                   value={userFullName}
-                  onChange={(e) => setUserFullName(e.target.value)}
-                  className="w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom animate-pulse-once"
-                  required
+                  onChange={(e) => {
+                    setUserFullName(e.target.value);
+                    clearUserFieldError("uName");
+                  }}
+                  className={fieldInputClass(!!userFieldErrors.uName, "w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom animate-pulse-once")}
                 />
+                <FormFieldError error={userFieldErrors.uName} />
               </div>
 
               <div className="space-y-1">
                 <label className="block text-xs font-bold text-slate-700">Email Address *</label>
                 <input
                   type="email"
-                  placeholder="e.g. martha@ethio-re.com"
+                  data-field="uEmail"
+                  placeholder="e.g. martha@ethiopianre.com"
                   value={userEmail}
-                  onChange={(e) => setUserEmail(e.target.value)}
-                  className="w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom"
-                  required
+                  onChange={(e) => {
+                    setUserEmail(e.target.value);
+                    clearUserFieldError("uEmail");
+                  }}
+                  className={fieldInputClass(!!userFieldErrors.uEmail, "w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom")}
                 />
+                <FormFieldError error={userFieldErrors.uEmail} />
               </div>
 
               <div className="space-y-1">
@@ -1162,39 +1313,53 @@ export default function Settings({
                 </label>
                 <input
                   type="password"
-                  placeholder="Password value"
+                  data-field="uPass"
+                  placeholder={editUserMode ? "Leave blank to keep existing password" : "Minimum 6 characters"}
                   value={userPassword}
-                  onChange={(e) => setUserPassword(e.target.value)}
-                  className="w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom"
-                  required={!editUserMode}
+                  onChange={(e) => {
+                    setUserPassword(e.target.value);
+                    clearUserFieldError("uPass");
+                  }}
+                  className={fieldInputClass(!!userFieldErrors.uPass, "w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom")}
                 />
+                <FormFieldError error={userFieldErrors.uPass} />
               </div>
 
               <div className="grid grid-cols-2 gap-3">
                 <div className="space-y-1">
-                  <label className="block text-xs font-bold text-slate-700">System Role</label>
+                  <label className="block text-xs font-bold text-slate-700">System Role *</label>
                   <select
+                    data-field="uRole"
                     value={userRole}
-                    onChange={(e) => setUserRole(e.target.value)}
-                    className="w-full px-3 py-2 border rounded-lg text-xs bg-white ring-primary-custom font-bold text-slate-800"
+                    onChange={(e) => {
+                      setUserRole(e.target.value);
+                      clearUserFieldError("uRole");
+                    }}
+                    className={fieldInputClass(!!userFieldErrors.uRole, "w-full px-3 py-2 border rounded-lg text-xs bg-white ring-primary-custom font-bold text-slate-800")}
                   >
                     {roles.map(r => (
                       <option key={r.id} value={r.id}>{r.name}</option>
                     ))}
                   </select>
+                  <FormFieldError error={userFieldErrors.uRole} />
                 </div>
                 <div className="space-y-1">
-                  <label className="block text-xs font-bold text-slate-700">Account Status</label>
+                  <label className="block text-xs font-bold text-slate-700">Account Status *</label>
                   <select
+                    data-field="uStatus"
                     value={userStatus}
-                    onChange={(e) => setUserStatus(e.target.value as AccountStatus)}
-                    className="w-full px-3 py-2 border rounded-lg text-xs bg-white ring-primary-custom font-bold"
+                    onChange={(e) => {
+                      setUserStatus(e.target.value as AccountStatus);
+                      clearUserFieldError("uStatus");
+                    }}
+                    className={fieldInputClass(!!userFieldErrors.uStatus, "w-full px-3 py-2 border rounded-lg text-xs bg-white ring-primary-custom font-bold")}
                   >
                     <option value="Active">Active</option>
                     <option value="Inactive">Inactive</option>
                     <option value="Suspended">Suspended</option>
                     <option value="Pending Verification">Pending Verification</option>
                   </select>
+                  <FormFieldError error={userFieldErrors.uStatus} />
                 </div>
               </div>
 
@@ -1239,10 +1404,11 @@ export default function Settings({
                 </button>
                 <button
                   type="submit"
-                  className="px-3.5 py-1.5 text-xs font-extrabold text-white bg-primary-custom hover:opacity-95 rounded-lg flex items-center gap-1"
+                  disabled={isSavingUser}
+                  className="px-3.5 py-1.5 text-xs font-extrabold text-white bg-primary-custom hover:opacity-95 rounded-lg flex items-center gap-1 disabled:opacity-50"
                 >
                   <Save className="h-4 w-4 text-accent-custom" />
-                  Save Account
+                  <span>{isSavingUser ? "Saving..." : "Save Account"}</span>
                 </button>
               </div>
             </form>
@@ -1306,6 +1472,222 @@ export default function Settings({
             </div>
           </div>
         </div>
+      )}
+
+      {/* INDIVIDUAL EMPLOYEE/USER PERMISSION OVERRIDES MODAL */}
+      {overrideUser && (() => {
+        const previewResolved = resolveUserPermissions(
+          { ...overrideUser, permissionOverrides: draftOverrides },
+          roles,
+          rolePermissions
+        );
+        const isEmpTarget = overrideUser.role === "Employee";
+        const editableModules = APP_MODULES.filter((m) =>
+          isEmpTarget ? !EMPLOYEE_BLOCKED_ADMIN_MODULES.has(m.id) && m.id !== "medical" && m.id !== "help" : true
+        );
+
+        const toggleModuleOverride = (moduleId: string, currentVal: boolean) => {
+          setDraftOverrides((prev) => ({
+            ...prev,
+            [moduleId]: {
+              ...(prev[moduleId] || {}),
+              enabled: !currentVal,
+            },
+          }));
+        };
+
+        const toggleActionOverride = (moduleId: string, action: keyof ActionPermissions, currentVal: boolean) => {
+          setDraftOverrides((prev) => ({
+            ...prev,
+            [moduleId]: {
+              ...(prev[moduleId] || {}),
+              actions: {
+                ...(prev[moduleId]?.actions || {}),
+                [action]: !currentVal,
+              },
+            },
+          }));
+        };
+
+        const toggleSubmenuOverride = (moduleId: string, subId: string, currentVal: boolean) => {
+          setDraftOverrides((prev) => ({
+            ...prev,
+            [moduleId]: {
+              ...(prev[moduleId] || {}),
+              submenus: {
+                ...(prev[moduleId]?.submenus || {}),
+                [subId]: !currentVal,
+              },
+            },
+          }));
+        };
+
+        const handleSaveOverrides = () => {
+          const updatedUsers = users.map((u) =>
+            u.id === overrideUser.id
+              ? {
+                  ...u,
+                  permissionOverrides: Object.keys(draftOverrides).length > 0 ? draftOverrides : undefined,
+                }
+              : u
+          );
+          const updatedTarget = updatedUsers.find((u) => u.id === overrideUser.id);
+          onUpdateUsers(updatedUsers, updatedTarget);
+          onLogAction(
+            "Security",
+            "User Permission Override",
+            overrideUser.email,
+            `Updated individual module/submenu permission overrides for ${overrideUser.fullName} (${overrideUser.role})`
+          );
+          toast.showSuccess(`Saved individual permission overrides for ${overrideUser.fullName}.`);
+          setOverrideUser(null);
+        };
+
+        return (
+          <div className="fixed inset-0 bg-black/55 flex items-center justify-center z-50 p-4">
+            <div className="bg-white rounded-xl shadow-2xl max-w-3xl w-full overflow-hidden animate-in fade-in zoom-in-95 duration-150 flex flex-col max-h-[88vh]">
+              <div className="bg-primary-custom text-white px-5 py-3.5 flex items-center justify-between">
+                <div>
+                  <h3 className="font-extrabold text-xs uppercase tracking-wider">
+                    Individual Access Overrides — {overrideUser.fullName}
+                  </h3>
+                  <p className="text-[10px] text-white/80">
+                    Role: {overrideUser.role} • {overrideUser.email}
+                  </p>
+                </div>
+                <button onClick={() => setOverrideUser(null)} className="text-white/80 hover:text-white rounded-full p-1">
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+
+              <div className="p-5 overflow-y-auto space-y-4">
+                {isEmpTarget && (
+                  <div className="p-3 rounded-lg bg-amber-50 border border-amber-200 text-[11px] text-amber-900 font-medium">
+                    Self-Service Security Guardrail: Administrative modules, cross-employee records, payroll administration, and approval queues are permanently locked off for Employee accounts. You can selectively enable or restrict individual ESS modules and submenus below.
+                  </div>
+                )}
+
+                <div className="border rounded-lg overflow-hidden">
+                  <table className="w-full text-left border-collapse text-xs">
+                    <thead>
+                      <tr className="bg-slate-50 border-b text-[10px] font-black uppercase text-slate-500">
+                        <th className="px-4 py-2.5">Module / Submenu</th>
+                        <th className="px-2 py-2.5 text-center">View</th>
+                        <th className="px-2 py-2.5 text-center">Create</th>
+                        <th className="px-2 py-2.5 text-center">Edit</th>
+                        <th className="px-2 py-2.5 text-center">Export</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {editableModules.map((mod) => {
+                        const effMod = previewResolved?.modulePermissions[mod.id];
+                        if (!effMod) return null;
+                        const label = getModuleLabelForRole(mod, overrideUser.role);
+                        const subs = getModuleSubmenusForRole(mod, overrideUser.role);
+                        return (
+                          <React.Fragment key={mod.id}>
+                            <tr className={effMod.enabled ? "bg-white" : "bg-slate-50/70"}>
+                              <td className="px-4 py-2.5 font-bold text-slate-800">
+                                <label className="flex items-center gap-2 cursor-pointer">
+                                  <input
+                                    type="checkbox"
+                                    checked={effMod.enabled}
+                                    onChange={() => toggleModuleOverride(mod.id, effMod.enabled)}
+                                    className="h-3.5 w-3.5 rounded text-primary-custom"
+                                  />
+                                  <span>{label}</span>
+                                </label>
+                              </td>
+                              {(["view", "create", "edit", "export"] as (keyof ActionPermissions)[]).map((act) => {
+                                const clampedOut =
+                                  isEmpTarget &&
+                                  ((mod.id === "employees" && (act === "create" || act === "edit")) ||
+                                    (mod.id === "attendance" && (act === "create" || act === "edit")) ||
+                                    (mod.id === "payroll" && (act === "create" || act === "edit")) ||
+                                    (mod.id === "documents" && (act === "create" || act === "edit")) ||
+                                    (mod.id === "notifications" && act === "create"));
+                                return (
+                                  <td key={act} className="px-2 py-2.5 text-center">
+                                    <input
+                                      type="checkbox"
+                                      checked={effMod.actions[act]}
+                                      disabled={!effMod.enabled || clampedOut}
+                                      onChange={() => toggleActionOverride(mod.id, act, effMod.actions[act])}
+                                      className="h-3.5 w-3.5 rounded text-primary-custom disabled:opacity-30"
+                                    />
+                                  </td>
+                                );
+                              })}
+                            </tr>
+                            {effMod.enabled && subs.length > 0 && (
+                              <tr className="bg-slate-50/40">
+                                <td colSpan={5} className="px-8 py-2">
+                                  <div className="flex flex-wrap gap-3">
+                                    {subs.map((sub) => (
+                                      <label key={sub.id} className="inline-flex items-center gap-1.5 text-[11px] text-slate-600 font-medium cursor-pointer">
+                                        <input
+                                          type="checkbox"
+                                          checked={Boolean(effMod.submenus[sub.id])}
+                                          onChange={() => toggleSubmenuOverride(mod.id, sub.id, Boolean(effMod.submenus[sub.id]))}
+                                          className="h-3 w-3 rounded text-primary-custom"
+                                        />
+                                        <span>{sub.name}</span>
+                                      </label>
+                                    ))}
+                                  </div>
+                                </td>
+                              </tr>
+                            )}
+                          </React.Fragment>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div className="px-5 py-3 border-t bg-slate-50 flex justify-between items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setDraftOverrides({})}
+                  className="px-3 py-1.5 text-xs font-bold text-slate-600 bg-white border hover:bg-slate-100 rounded-lg flex items-center gap-1"
+                >
+                  <RotateCcw className="h-3.5 w-3.5" />
+                  Reset to Role Defaults
+                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setOverrideUser(null)}
+                    className="px-3 py-1.5 text-xs font-semibold text-slate-600 bg-slate-200 hover:bg-slate-300 rounded-lg"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleSaveOverrides}
+                    className="px-4 py-1.5 text-xs font-extrabold text-white bg-primary-custom hover:opacity-95 rounded-lg flex items-center gap-1.5"
+                  >
+                    <Save className="h-3.5 w-3.5 text-accent-custom" />
+                    Apply Overrides
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {confirmState && (
+        <ConfirmDialog
+          isOpen={confirmState.isOpen}
+          title={confirmState.title}
+          message={confirmState.message}
+          confirmText={confirmState.confirmText}
+          variant={confirmState.variant}
+          onConfirm={confirmState.onConfirm}
+          onCancel={() => setConfirmState(null)}
+        />
       )}
     </div>
   );

@@ -1,46 +1,79 @@
 import React, { useState, useEffect } from "react";
 import {
-  Upload, Trash2, Search, ExternalLink,
-  FileText, CheckCircle2, RefreshCw, Link as LinkIcon, User, Landmark, ShieldCheck, AlertCircle, Download
+  Upload,
+  Trash2,
+  Search,
+  ExternalLink,
+  FileText,
+  CheckCircle2,
+  RefreshCw,
+  Link as LinkIcon,
+  User as UserIcon,
+  Landmark,
+  ShieldCheck,
+  AlertCircle,
+  Download,
 } from "lucide-react";
-import { uploadFileToStorage, deleteFileFromStorage, listStorageFolderFiles, StorageDocumentItem } from "../firebase";
+import {
+  uploadFileToStorage,
+  deleteFileFromStorage,
+  listStorageFolderFiles,
+  StorageDocumentItem,
+} from "../firebase";
 import { syncRecordToFirestore, deleteRecordFromFirestore } from "../firebaseSync";
-import { Employee, Department, ModulePermission, User as AppUser } from "../types";
+import {
+  Employee,
+  Department,
+  ModulePermission,
+  User as AppUser,
+  DriveAssociation,
+  ESSDocumentCategory,
+} from "../types";
 import { getDepartmentHeadManagedDeptIds } from "../utils/rbacUtils";
+import { useToast, ConfirmDialog } from "./ui/ToastProvider";
+import { FormFieldError, fieldInputClass } from "./ui/FormFeedback";
+import { validateDocumentUpload, focusFirstInvalidField } from "../utils/validation";
 
-export interface DriveAssociation {
-  id: string;
-  fileId: string;
-  fileName: string;
-  mimeType: string;
-  webViewLink: string;
-  targetType: "Employee" | "Department";
-  targetId: string;
-  associatedBy: string;
-  associatedDate: string;
-}
+export type { DriveAssociation };
 
 interface DocumentVaultProps {
   employees: Employee[];
   departments: Department[];
+  users?: AppUser[];
   currentUser: AppUser | null;
   permissions?: ModulePermission;
+  driveAssociations?: DriveAssociation[];
+  onUpdateDriveAssociations?: (assocs: DriveAssociation[]) => void;
   onLogAction: (module: string, action: string, record: string, details: string) => void;
 }
+
+const ESS_DOCUMENT_CATEGORIES: ESSDocumentCategory[] = [
+  "Employment Contract",
+  "Appointment Letter",
+  "Promotion & Transfer Letter",
+  "Other Personal HR Document",
+];
 
 export default function DocumentVault({
   employees,
   departments,
+  users = [],
   currentUser,
   permissions,
-  onLogAction
+  driveAssociations,
+  onUpdateDriveAssociations,
+  onLogAction,
 }: DocumentVaultProps) {
   const canCreate = permissions ? permissions.actions.create : currentUser?.role !== "Auditor";
   const canEdit = permissions ? permissions.actions.edit : currentUser?.role !== "Auditor";
   const canDelete = permissions ? permissions.actions.delete : currentUser?.role !== "Auditor";
   const isEmployee = currentUser?.role === "Employee";
   const isDeptHead = currentUser?.role === "Department Head";
-  const managedDeptIds = isDeptHead ? getDepartmentHeadManagedDeptIds(currentUser, departments, employees) : [];
+  const managedDeptIds = isDeptHead
+    ? getDepartmentHeadManagedDeptIds(currentUser, departments, employees)
+    : [];
+
+  const { showSuccess, showError } = useToast();
 
   // Firebase Storage Document Vault States
   const [storageFiles, setStorageFiles] = useState<StorageDocumentItem[]>([]);
@@ -50,15 +83,34 @@ export default function DocumentVault({
   const [storageSuccess, setStorageSuccess] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [confirmDeleteFile, setConfirmDeleteFile] = useState<StorageDocumentItem | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
 
-  // Associations States
-  const [associations, setAssociations] = useState<DriveAssociation[]>([]);
+  // Associations States (sync with App.tsx prop if provided)
+  const [localAssociations, setLocalAssociations] = useState<DriveAssociation[]>(() => {
+    if (driveAssociations) return driveAssociations;
+    try {
+      const saved = localStorage.getItem("drive_associations");
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+  const associations = driveAssociations ?? localAssociations;
+
   const [associatingFile, setAssociatingFile] = useState<StorageDocumentItem | null>(null);
   const [assocTargetType, setAssocTargetType] = useState<"Employee" | "Department">("Employee");
   const [assocTargetId, setAssocTargetId] = useState("");
+  const [assocCategory, setAssocCategory] = useState<ESSDocumentCategory>("Other Personal HR Document");
+  const [assocError, setAssocError] = useState("");
   const [confirmRemoveAssoc, setConfirmRemoveAssoc] = useState<DriveAssociation | null>(null);
 
   const loadStorageDocuments = async () => {
+    if (isEmployee) {
+      // Employees only view documents explicitly linked to their own Employee ID
+      setStorageFiles([]);
+      setStorageLoading(false);
+      return;
+    }
     setStorageLoading(true);
     setStorageError(null);
     try {
@@ -72,39 +124,49 @@ export default function DocumentVault({
   };
 
   useEffect(() => {
-    const saved = localStorage.getItem("drive_associations");
-    if (saved) {
-      try {
-        setAssociations(JSON.parse(saved));
-      } catch (err) {
-        console.error("Error reading document associations", err);
-      }
-    }
     loadStorageDocuments();
-  }, []);
+  }, [isEmployee]);
 
   const saveAssociations = (newAssocs: DriveAssociation[]) => {
-    setAssociations(newAssocs);
-    localStorage.setItem("drive_associations", JSON.stringify(newAssocs));
+    setLocalAssociations(newAssocs);
+    if (onUpdateDriveAssociations) {
+      onUpdateDriveAssociations(newAssocs);
+    }
+    try {
+      localStorage.setItem("drive_associations", JSON.stringify(newAssocs));
+    } catch {
+      // Ignore quota errors
+    }
   };
 
   const handleStorageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (isEmployee || !canCreate) return;
     const file = e.target.files?.[0];
     if (!file) return;
     setStorageError(null);
     setStorageSuccess(null);
-    if (file.size > 10 * 1024 * 1024) {
-      setStorageError("File exceeds the 10MB Firebase Storage limit.");
+
+    const fileCheck = validateDocumentUpload(file, { maxSizeMB: 10 });
+    if (!fileCheck.valid) {
+      const msg = fileCheck.error || "Invalid document file.";
+      setStorageError(msg);
+      showError(msg, "File Validation Failed");
+      e.target.value = "";
       return;
     }
+
     setStorageUploading(true);
     try {
       await uploadFileToStorage("documents", file);
       onLogAction("DocumentVault", "Storage Upload", file.name, "Uploaded HR document to Firebase Storage (documents/)");
-      setStorageSuccess(`Uploaded '${file.name}' to Firebase Storage.`);
+      const okMsg = `Uploaded '${file.name}' to document vault.`;
+      setStorageSuccess(okMsg);
+      showSuccess(okMsg);
       await loadStorageDocuments();
     } catch (err: any) {
-      setStorageError(err?.message || "Failed to upload document to Firebase Storage.");
+      const errMsg = err?.message || "Failed to upload document to cloud storage.";
+      setStorageError(errMsg);
+      showError(errMsg, "Upload Failed");
     } finally {
       setStorageUploading(false);
       e.target.value = "";
@@ -112,32 +174,60 @@ export default function DocumentVault({
   };
 
   const handleConfirmDeleteFile = async () => {
-    if (!confirmDeleteFile) return;
+    if (!confirmDeleteFile || isDeleting || isEmployee || !canDelete) return;
     const item = confirmDeleteFile;
-    setConfirmDeleteFile(null);
+    setIsDeleting(true);
     setStorageError(null);
     setStorageSuccess(null);
     try {
       await deleteFileFromStorage(item.fullPath);
-      const removedAssocs = associations.filter(a => a.fileId === item.fullPath);
-      const updatedAssoc = associations.filter(a => a.fileId !== item.fullPath);
+      const removedAssocs = associations.filter((a) => a.fileId === item.fullPath);
+      const updatedAssoc = associations.filter((a) => a.fileId !== item.fullPath);
       saveAssociations(updatedAssoc);
-      removedAssocs.forEach(a => deleteRecordFromFirestore("drive_associations", a.id));
+      removedAssocs.forEach((a) => deleteRecordFromFirestore("drive_associations", a.id));
       onLogAction("DocumentVault", "Storage Delete", item.name, "Deleted HR document from Firebase Storage");
-      setStorageFiles(prev => prev.filter(f => f.fullPath !== item.fullPath));
-      setStorageSuccess(`Deleted '${item.name}' from Firebase Storage.`);
+      setStorageFiles((prev) => prev.filter((f) => f.fullPath !== item.fullPath));
+      const msg = `Deleted '${item.name}' from document vault.`;
+      setStorageSuccess(msg);
+      showSuccess(msg);
+      setConfirmDeleteFile(null);
     } catch (err: any) {
-      setStorageError(err?.message || "Failed to delete document from Firebase Storage.");
+      const errMsg = err?.message || "Failed to delete document from cloud storage.";
+      setStorageError(errMsg);
+      showError(errMsg);
+    } finally {
+      setIsDeleting(false);
     }
   };
 
   const handleCreateAssociation = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!associatingFile || !assocTargetId) return;
+    if (!associatingFile || isEmployee || !canEdit) return;
+    if (!assocTargetId) {
+      const errMsg = `Please select a target ${assocTargetType.toLowerCase()} to link this document.`;
+      setAssocError(errMsg);
+      focusFirstInvalidField({ assocTargetId: errMsg });
+      return;
+    }
+    setAssocError("");
 
-    const targetName = assocTargetType === "Employee"
-      ? employees.find(emp => emp.employeeId === assocTargetId)?.fullName || "Unknown Employee"
-      : departments.find(dept => dept.id === assocTargetId)?.name || "Unknown Department";
+    const targetEmp =
+      assocTargetType === "Employee"
+        ? employees.find((emp) => emp.employeeId === assocTargetId)
+        : undefined;
+    const targetName =
+      assocTargetType === "Employee"
+        ? targetEmp?.fullName || "Unknown Employee"
+        : departments.find((dept) => dept.id === assocTargetId)?.name || "Unknown Department";
+
+    const linkedUser =
+      assocTargetType === "Employee"
+        ? users.find(
+            (u) =>
+              u.employeeId === assocTargetId ||
+              (targetEmp && u.email.trim().toLowerCase() === targetEmp.email.trim().toLowerCase())
+          )
+        : undefined;
 
     const newAssoc: DriveAssociation = {
       id: `ASSOC_${Date.now()}`,
@@ -147,8 +237,10 @@ export default function DocumentVault({
       webViewLink: associatingFile.url,
       targetType: assocTargetType,
       targetId: assocTargetId,
+      documentCategory: assocTargetType === "Employee" ? assocCategory : undefined,
+      ownerUid: linkedUser?.id,
       associatedBy: currentUser?.email || "Unknown",
-      associatedDate: new Date().toLocaleDateString("en-US")
+      associatedDate: new Date().toLocaleDateString("en-US"),
     };
 
     const updated = [newAssoc, ...associations];
@@ -159,22 +251,24 @@ export default function DocumentVault({
       "DocumentVault",
       "Associate Document",
       associatingFile.name,
-      `Linked document to ${assocTargetType}: ${targetName} (ID: ${assocTargetId})`
+      `Linked document (${assocTargetType === "Employee" ? assocCategory : "Department"}) to ${targetName} (ID: ${assocTargetId})`
     );
 
+    showSuccess(`Linked "${associatingFile.name}" to ${targetName}.`);
     setAssociatingFile(null);
     setAssocTargetId("");
   };
 
   const handleConfirmRemoveAssociation = () => {
-    if (!confirmRemoveAssoc) return;
+    if (!confirmRemoveAssoc || isEmployee || !canDelete) return;
     const target = confirmRemoveAssoc;
     setConfirmRemoveAssoc(null);
 
-    const updated = associations.filter(assoc => assoc.id !== target.id);
+    const updated = associations.filter((assoc) => assoc.id !== target.id);
     saveAssociations(updated);
     deleteRecordFromFirestore("drive_associations", target.id);
     onLogAction("DocumentVault", "Remove Association", target.fileName, "Removed internal link to system entity");
+    showSuccess(`Removed document link for "${target.fileName}".`);
   };
 
   const formatBytes = (bytes?: number) => {
@@ -184,21 +278,27 @@ export default function DocumentVault({
     return `${(bytes / 1048576).toFixed(1)} MB`;
   };
 
-  const visibleAssociations = associations.filter(assoc => {
+  const visibleAssociations = associations.filter((assoc) => {
     if (isEmployee) {
-      return assoc.targetType === "Employee" && assoc.targetId === currentUser?.employeeId;
+      return Boolean(
+        currentUser?.employeeId &&
+          assoc.targetType === "Employee" &&
+          assoc.targetId === currentUser.employeeId
+      );
     }
     if (isDeptHead && managedDeptIds.length > 0) {
       if (assoc.targetType === "Department") return managedDeptIds.includes(assoc.targetId);
-      const empObj = employees.find(e => e.employeeId === assoc.targetId);
+      const empObj = employees.find((e) => e.employeeId === assoc.targetId);
       return empObj ? managedDeptIds.includes(empObj.departmentId) : false;
     }
     return true;
   });
 
-  const filteredStorageFiles = storageFiles.filter(item =>
-    !searchQuery.trim() || item.name.toLowerCase().includes(searchQuery.trim().toLowerCase())
-  );
+  const filteredStorageFiles = isEmployee
+    ? []
+    : storageFiles.filter(
+        (item) => !searchQuery.trim() || item.name.toLowerCase().includes(searchQuery.trim().toLowerCase())
+      );
 
   return (
     <div className="space-y-6">
@@ -212,7 +312,7 @@ export default function DocumentVault({
             <h1 className="text-lg font-bold text-slate-800">HR Document Vault</h1>
           </div>
           <p className="text-xs text-slate-500 font-medium">
-            Manage, store, and link personnel contracts, verification forms, and company policies securely in Firebase Cloud Storage.
+            Manage, store, and link personnel contracts, appointment letters, and company policies securely in Firebase Cloud Storage.
           </p>
         </div>
 
@@ -273,14 +373,16 @@ export default function DocumentVault({
                   </label>
                 )}
 
-                <button
-                  type="button"
-                  onClick={loadStorageDocuments}
-                  className="p-1.5 bg-white hover:bg-slate-50 border rounded-lg text-slate-600"
-                  title="Reload repository"
-                >
-                  <RefreshCw className={`h-4 w-4 ${storageLoading ? "animate-spin" : ""}`} />
-                </button>
+                {!isEmployee && (
+                  <button
+                    type="button"
+                    onClick={loadStorageDocuments}
+                    className="p-1.5 bg-white hover:bg-slate-50 border rounded-lg text-slate-600"
+                    title="Reload repository"
+                  >
+                    <RefreshCw className={`h-4 w-4 ${storageLoading ? "animate-spin" : ""}`} />
+                  </button>
+                )}
               </div>
             </div>
 
@@ -289,7 +391,7 @@ export default function DocumentVault({
               <span className="text-slate-400">Firebase Storage</span>
               <span>/</span>
               <span className="text-slate-700 font-bold bg-slate-100 p-0.5 px-2 rounded">
-                documents
+                {isEmployee ? "personal-documents" : "documents"}
               </span>
             </div>
 
@@ -370,7 +472,7 @@ export default function DocumentVault({
           </div>
 
           {/* ASSOCIATION DRAWER MODAL */}
-          {associatingFile && (
+          {associatingFile && !isEmployee && (
             <div className="bg-sky-50 border border-sky-200 rounded-xl p-5 shadow-2xs space-y-4">
               <div className="flex justify-between items-start">
                 <div className="space-y-0.5">
@@ -388,7 +490,7 @@ export default function DocumentVault({
                 </button>
               </div>
 
-              <form onSubmit={handleCreateAssociation} className="grid grid-cols-1 md:grid-cols-3 gap-3 items-end">
+              <form onSubmit={handleCreateAssociation} noValidate className="grid grid-cols-1 md:grid-cols-4 gap-3 items-start">
                 <div>
                   <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Target Entity Type</label>
                   <select
@@ -396,6 +498,7 @@ export default function DocumentVault({
                     onChange={(e) => {
                       setAssocTargetType(e.target.value as any);
                       setAssocTargetId("");
+                      setAssocError("");
                     }}
                     className="w-full text-xs p-1.5 border rounded bg-white text-slate-800"
                   >
@@ -405,36 +508,57 @@ export default function DocumentVault({
                 </div>
 
                 <div>
-                  <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Select Specific Entity</label>
+                  <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Select Specific Entity <span className="text-rose-500">*</span></label>
                   <select
+                    data-field="assocTargetId"
                     value={assocTargetId}
-                    onChange={(e) => setAssocTargetId(e.target.value)}
-                    className="w-full text-xs p-1.5 border rounded bg-white text-slate-800"
-                    required
+                    onChange={(e) => {
+                      setAssocTargetId(e.target.value);
+                      if (assocError) setAssocError("");
+                    }}
+                    className={fieldInputClass(Boolean(assocError), "w-full text-xs p-1.5 border rounded bg-white text-slate-800")}
                   >
                     <option value="">-- Choose Target --</option>
-                    {assocTargetType === "Employee" ? (
-                      employees.map(emp => (
-                        <option key={emp.employeeId} value={emp.employeeId}>
-                          {emp.fullName} ({emp.position})
-                        </option>
-                      ))
-                    ) : (
-                      departments.map(dept => (
-                        <option key={dept.id} value={dept.id}>
-                          {dept.name} ({dept.code})
-                        </option>
-                      ))
-                    )}
+                    {assocTargetType === "Employee"
+                      ? employees.map((emp) => (
+                          <option key={emp.employeeId} value={emp.employeeId}>
+                            {emp.fullName} ({emp.position})
+                          </option>
+                        ))
+                      : departments.map((dept) => (
+                          <option key={dept.id} value={dept.id}>
+                            {dept.name} ({dept.code})
+                          </option>
+                        ))}
                   </select>
+                  <FormFieldError error={assocError} />
                 </div>
 
-                <button
-                  type="submit"
-                  className="py-2 px-4 bg-sky-600 hover:bg-sky-700 text-white rounded font-bold text-xs flex items-center justify-center gap-1 transition-all shadow-2xs"
-                >
-                  <CheckCircle2 className="h-3.5 w-3.5" /> Establish Link
-                </button>
+                {assocTargetType === "Employee" && (
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Document Category</label>
+                    <select
+                      value={assocCategory}
+                      onChange={(e) => setAssocCategory(e.target.value as ESSDocumentCategory)}
+                      className="w-full text-xs p-1.5 border rounded bg-white text-slate-800"
+                    >
+                      {ESS_DOCUMENT_CATEGORIES.map((cat) => (
+                        <option key={cat} value={cat}>
+                          {cat}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+
+                <div className="md:pt-5">
+                  <button
+                    type="submit"
+                    className="w-full py-2 px-4 bg-sky-600 hover:bg-sky-700 text-white rounded font-bold text-xs flex items-center justify-center gap-1 transition-all shadow-2xs"
+                  >
+                    <CheckCircle2 className="h-3.5 w-3.5" /> Establish Link
+                  </button>
+                </div>
               </form>
             </div>
           )}
@@ -452,20 +576,25 @@ export default function DocumentVault({
                 <div className="text-center p-8 text-slate-400">
                   <LinkIcon className="h-8 w-8 mx-auto text-slate-200 mb-1.5 stroke-1" />
                   <p className="text-[11px] font-semibold">No active file associations</p>
-                  <p className="text-[10px] text-slate-400 mt-0.5">Use the "Link" action on any stored file to map it to an employee or department.</p>
+                  <p className="text-[10px] text-slate-400 mt-0.5">
+                    {isEmployee
+                      ? "Personal HR documents linked by Human Resources will appear here."
+                      : 'Use the "Link" action on any stored file to map it to an employee or department.'}
+                  </p>
                 </div>
               ) : (
-                visibleAssociations.map(assoc => {
-                  const employeeObj = employees.find(e => e.employeeId === assoc.targetId);
-                  const departmentObj = departments.find(d => d.id === assoc.targetId);
-                  const label = assoc.targetType === "Employee"
-                    ? employeeObj?.fullName || "Employee Deleted"
-                    : departmentObj?.name || "Department Deleted";
+                visibleAssociations.map((assoc) => {
+                  const employeeObj = employees.find((e) => e.employeeId === assoc.targetId);
+                  const departmentObj = departments.find((d) => d.id === assoc.targetId);
+                  const label =
+                    assoc.targetType === "Employee"
+                      ? employeeObj?.fullName || "Employee Record"
+                      : departmentObj?.name || "Department Vault";
 
                   return (
                     <div key={assoc.id} className="p-3 bg-slate-50 border rounded-lg space-y-2 hover:border-slate-300 transition-all">
                       <div className="flex justify-between items-start gap-2">
-                        <span className="text-[10px] font-bold text-slate-700 truncate block max-w-[150px]" title={assoc.fileName}>
+                        <span className="text-[10px] font-bold text-slate-700 truncate block max-w-[175px]" title={assoc.fileName}>
                           {assoc.fileName}
                         </span>
                         {canDelete && !isEmployee && (
@@ -480,10 +609,16 @@ export default function DocumentVault({
                         )}
                       </div>
 
+                      {assoc.documentCategory && (
+                        <span className="inline-block px-2 py-0.5 rounded bg-sky-50 text-sky-700 border border-sky-200 text-[9px] font-bold">
+                          {assoc.documentCategory}
+                        </span>
+                      )}
+
                       <div className="pt-1 border-t border-slate-100 flex items-center justify-between text-[10px]">
                         <span className="font-bold uppercase tracking-wider flex items-center gap-1 text-[9px] text-slate-400">
                           {assoc.targetType === "Employee" ? (
-                            <User className="h-3 w-3 text-sky-500" />
+                            <UserIcon className="h-3 w-3 text-sky-500" />
                           ) : (
                             <Landmark className="h-3 w-3 text-indigo-500" />
                           )}
@@ -514,69 +649,38 @@ export default function DocumentVault({
         </div>
       </div>
 
-      {/* CONFIRM DELETE FILE MODAL */}
-      {confirmDeleteFile && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl shadow-xl max-w-sm w-full overflow-hidden">
-            <div className="bg-rose-600 text-white px-5 py-3.5 font-extrabold text-xs uppercase tracking-wider">
-              Confirm Document Deletion
-            </div>
-            <div className="p-5 space-y-4 text-xs text-slate-700">
-              <p>
-                Permanently delete <strong>{confirmDeleteFile.name}</strong> from Firebase Cloud Storage and remove any linked associations?
-              </p>
-              <div className="flex justify-end gap-2 pt-2 border-t">
-                <button
-                  type="button"
-                  onClick={() => setConfirmDeleteFile(null)}
-                  className="px-3.5 py-1.5 text-xs font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  onClick={handleConfirmDeleteFile}
-                  className="px-3.5 py-1.5 text-xs font-extrabold text-white bg-rose-600 hover:bg-rose-700 rounded-lg"
-                >
-                  Confirm Delete
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
+      <ConfirmDialog
+        isOpen={Boolean(confirmDeleteFile)}
+        title="Confirm Document Deletion"
+        message={
+          confirmDeleteFile ? (
+            <>
+              Permanently delete <strong>{confirmDeleteFile.name}</strong> from Firebase Cloud Storage and remove any linked associations? This cannot be undone.
+            </>
+          ) : null
+        }
+        confirmText="Confirm Delete"
+        variant="danger"
+        isLoading={isDeleting}
+        onConfirm={handleConfirmDeleteFile}
+        onCancel={() => setConfirmDeleteFile(null)}
+      />
 
-      {/* CONFIRM REMOVE ASSOCIATION MODAL */}
-      {confirmRemoveAssoc && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl shadow-xl max-w-sm w-full overflow-hidden">
-            <div className="bg-primary-custom text-white px-5 py-3.5 font-extrabold text-xs uppercase tracking-wider">
-              Remove Document Link
-            </div>
-            <div className="p-5 space-y-4 text-xs text-slate-700">
-              <p>
-                Remove the association for <strong>{confirmRemoveAssoc.fileName}</strong>? The file itself remains in Firebase Storage.
-              </p>
-              <div className="flex justify-end gap-2 pt-2 border-t">
-                <button
-                  type="button"
-                  onClick={() => setConfirmRemoveAssoc(null)}
-                  className="px-3.5 py-1.5 text-xs font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  onClick={handleConfirmRemoveAssociation}
-                  className="px-3.5 py-1.5 text-xs font-extrabold text-white bg-rose-600 hover:bg-rose-700 rounded-lg"
-                >
-                  Remove Link
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
+      <ConfirmDialog
+        isOpen={Boolean(confirmRemoveAssoc)}
+        title="Remove Document Link"
+        message={
+          confirmRemoveAssoc ? (
+            <>
+              Remove the association for <strong>{confirmRemoveAssoc.fileName}</strong>? The file itself remains in Firebase Storage.
+            </>
+          ) : null
+        }
+        confirmText="Remove Link"
+        variant="warning"
+        onConfirm={handleConfirmRemoveAssociation}
+        onCancel={() => setConfirmRemoveAssoc(null)}
+      />
     </div>
   );
 }

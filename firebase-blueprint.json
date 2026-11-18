@@ -2,15 +2,19 @@
   "entities": {
     "User": {
       "title": "User",
-      "description": "An administrative operator or HR Officer of the HRMS system.",
+      "description": "An administrative operator, HR Officer, Department Head, Auditor, or Employee portal account.",
       "type": "object",
       "properties": {
         "id": { "type": "string", "maxLength": 128 },
         "fullName": { "type": "string", "maxLength": 256 },
         "email": { "type": "string", "maxLength": 256, "pattern": "^[^@]+@[^@]+\\.[^@]+$" },
         "role": { "type": "string", "maxLength": 128 },
-        "status": { "type": "string", "enum": ["Active", "Inactive", "Suspended"] },
-        "createdDate": { "type": "string", "maxLength": 64 }
+        "employeeId": { "type": "string", "maxLength": 128 },
+        "status": { "type": "string", "enum": ["Active", "Inactive", "Pending Verification", "Suspended"] },
+        "emailVerified": { "type": "boolean" },
+        "permissionOverrides": { "type": "object" },
+        "createdDate": { "type": "string", "maxLength": 64 },
+        "lastLogin": { "type": "string", "maxLength": 64 }
       },
       "required": ["id", "fullName", "email", "role", "status", "createdDate"]
     },
@@ -31,12 +35,13 @@
     },
     "RolePermissions": {
       "title": "RolePermissions",
-      "description": "Dynamic module, submenu, and action permissions assigned to a role.",
+      "description": "Dynamic module, submenu, action, and dataScope permissions assigned to a role.",
       "type": "object",
       "properties": {
         "id": { "type": "string", "maxLength": 128 },
         "roleId": { "type": "string", "maxLength": 128 },
         "modulePermissions": { "type": "object" },
+        "essMigrated": { "type": "boolean" },
         "updatedBy": { "type": "string", "maxLength": 256 },
         "updatedAt": { "type": "string", "maxLength": 64 }
       },
@@ -402,12 +407,88 @@
         "updatedDate": { "type": "string", "maxLength": 64 }
       },
       "required": ["id", "companyName", "currency", "autoEmailPayslipsOnApproval", "updatedBy", "updatedDate"]
+    },
+    "EmailActivityLog": {
+      "title": "EmailActivityLog",
+      "description": "Audit log of system email dispatch attempts and delivery outcomes.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "recipientEmail": { "type": "string", "maxLength": 256 },
+        "subject": { "type": "string", "maxLength": 256 },
+        "sendingModule": { "type": "string", "maxLength": 128 },
+        "dateTime": { "type": "string", "maxLength": 64 },
+        "deliveryStatus": { "type": "string", "maxLength": 64 },
+        "triggeredBy": { "type": "string", "maxLength": 256 }
+      },
+      "required": ["id", "recipientEmail", "subject", "sendingModule", "dateTime", "deliveryStatus", "triggeredBy"]
+    },
+    "HRRequest": {
+      "title": "HRRequest",
+      "description": "Employee self-service request for profile updates, attendance corrections, letters, or general HR inquiries.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "employeeId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "employeeName": { "type": "string", "maxLength": 256 },
+        "requestType": { "type": "string", "enum": ["profile_update", "attendance_correction", "letter_request", "general_hr"] },
+        "subject": { "type": "string", "maxLength": 256 },
+        "description": { "type": "string", "maxLength": 2000 },
+        "status": { "type": "string", "enum": ["Pending", "Approved", "Rejected", "Cancelled"] },
+        "requestedChanges": { "type": "object" },
+        "attendanceCorrection": { "type": "object" },
+        "reviewedBy": { "type": "string", "maxLength": 256 },
+        "reviewedDate": { "type": "string", "maxLength": 64 },
+        "reviewComments": { "type": "string", "maxLength": 1000 },
+        "createdDate": { "type": "string", "maxLength": 64 },
+        "updatedDate": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id", "employeeId", "employeeName", "requestType", "subject", "description", "status", "createdDate", "updatedDate"]
+    },
+    "EmployeeNotification": {
+      "title": "EmployeeNotification",
+      "description": "Personal workflow notifications or company-wide HR announcements.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "title": { "type": "string", "maxLength": 256 },
+        "message": { "type": "string", "maxLength": 2000 },
+        "category": { "type": "string", "enum": ["personal", "announcement"] },
+        "recipientEmployeeId": { "type": "string", "maxLength": 128 },
+        "recipientEmail": { "type": "string", "maxLength": 256 },
+        "isRead": { "type": "boolean" },
+        "readByUserIds": { "type": "array" },
+        "relatedModule": { "type": "string", "maxLength": 64 },
+        "relatedRecordId": { "type": "string", "maxLength": 128 },
+        "createdDate": { "type": "string", "maxLength": 64 },
+        "createdBy": { "type": "string", "maxLength": 256 }
+      },
+      "required": ["id", "title", "message", "category", "isRead", "createdDate", "createdBy"]
+    },
+    "DriveAssociation": {
+      "title": "DriveAssociation",
+      "description": "Metadata associating a Firebase Storage HR document with an Employee or Department.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "fileId": { "type": "string", "maxLength": 256 },
+        "fileName": { "type": "string", "maxLength": 256 },
+        "fileLink": { "type": "string", "maxLength": 1024 },
+        "storagePath": { "type": "string", "maxLength": 512 },
+        "targetType": { "type": "string", "enum": ["Employee", "Department"] },
+        "targetId": { "type": "string", "maxLength": 128 },
+        "targetName": { "type": "string", "maxLength": 256 },
+        "documentCategory": { "type": "string", "enum": ["Employment Contract", "Appointment Letter", "Promotion & Transfer Letter", "Other Personal HR Document"] },
+        "linkedBy": { "type": "string", "maxLength": 256 },
+        "linkedDate": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id", "fileId", "fileName", "fileLink", "targetType", "targetId", "targetName", "linkedBy", "linkedDate"]
     }
   },
   "firestore": {
     "users": {
       "schema": "User",
-      "description": "Gated system operators"
+      "description": "Gated system operators and employee self-service accounts"
     },
     "departments": {
       "schema": "Department",
@@ -491,11 +572,23 @@
     },
     "role_permissions": {
       "schema": "RolePermissions",
-      "description": "Dynamic module, submenu, and action permission matrices per role"
+      "description": "Dynamic module, submenu, action, and scope permission matrices per role"
     },
     "email_logs": {
       "schema": "EmailActivityLog",
       "description": "Central system email delivery and blocked status audit logs"
+    },
+    "hr_requests": {
+      "schema": "HRRequest",
+      "description": "Employee self-service HR requests and HR review queue"
+    },
+    "notifications": {
+      "schema": "EmployeeNotification",
+      "description": "Personal workflow notifications and HR announcements"
+    },
+    "drive_associations": {
+      "schema": "DriveAssociation",
+      "description": "Linked HR documents and categories associated with employees and departments"
     }
   }
 }

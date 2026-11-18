@@ -5,6 +5,9 @@ import { formatReportDateTime, ReportExportPayload } from "../utils/reportBrandi
 import ReportPrintButton from "./reports/ReportPrintButton";
 import ReportPDFExportButton from "./reports/ReportPDFExportButton";
 import { Plus, Search, Landmark, Edit, Trash2, X, Save, AlertTriangle } from "lucide-react";
+import { useToast, ConfirmDialog } from "./ui/ToastProvider";
+import { FormFieldError, ValidationSummary, fieldInputClass } from "./ui/FormFeedback";
+import { validateDepartmentForm, focusFirstInvalidField } from "../utils/validation";
 
 interface DepartmentsProps {
   departments: Department[];
@@ -52,8 +55,13 @@ export default function Departments({
   const [headEmployeeId, setHeadEmployeeId] = useState("");
   const [parentDepartmentId, setParentDepartmentId] = useState("");
 
+  const { showSuccess, showError, showWarning } = useToast();
+
   const [formError, setFormError] = useState("");
   const [formSuccess, setFormSuccess] = useState("");
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [confirmDeleteDept, setConfirmDeleteDept] = useState<Department | null>(null);
 
   const filteredDepts = departments.filter(d => {
     if (isDeptHead && managedDeptIds.length > 0 && !managedDeptIds.includes(d.id)) return false;
@@ -73,6 +81,7 @@ export default function Departments({
     setParentDepartmentId("");
     setFormError("");
     setFormSuccess("");
+    setFieldErrors({});
   };
 
   const handleOpenAdd = () => {
@@ -91,38 +100,37 @@ export default function Departments({
     setParentDepartmentId(d.parentDepartmentId || "");
     setFormError("");
     setFormSuccess("");
+    setFieldErrors({});
     setEditModalOpen(true);
   };
 
   const handleAddSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
     setFormError("");
     setFormSuccess("");
+    setFieldErrors({});
 
-    if (!deptName.trim() || !deptCode.trim()) {
-      setFormError("Department Name and Code are required.");
+    const check = validateDepartmentForm(
+      { name: deptName, code: deptCode, status: deptStatus, parentDepartmentId },
+      departments,
+      employees,
+      "add"
+    );
+    if (!check.valid) {
+      setFieldErrors(check.errors);
+      setFormError(check.summaryMessage || "Please correct the highlighted fields.");
+      focusFirstInvalidField(check.errors);
       return;
     }
 
-    // Uniqueness validation
-    const nameExists = departments.some(d => d.name.toLowerCase() === deptName.trim().toLowerCase());
-    const codeExists = departments.some(d => d.code.toLowerCase() === deptCode.trim().toLowerCase());
-
-    if (nameExists) {
-      setFormError(`Department Name '${deptName}' is already taken.`);
-      return;
-    }
-    if (codeExists) {
-      setFormError(`Department Code '${deptCode}' is already taken.`);
-      return;
-    }
-
+    setIsSubmitting(true);
     const uniqueId = deptCode.trim().toUpperCase();
 
     const newDept: Department = {
       id: uniqueId,
       name: deptName.trim(),
-      code: deptCode.trim().toUpperCase(),
+      code: uniqueId,
       description: description.trim(),
       status: deptStatus,
       headEmployeeId: headEmployeeId || undefined,
@@ -134,6 +142,7 @@ export default function Departments({
     const ok = onAddDepartment(newDept);
     if (ok) {
       setFormSuccess("Department created successfully!");
+      showSuccess(`Department "${newDept.name}" (${newDept.code}) created.`);
       onLogAction(
         "Departments",
         "Department Created",
@@ -141,52 +150,44 @@ export default function Departments({
         `Created department: ${newDept.name} (${newDept.code})`
       );
       setTimeout(() => {
+        setIsSubmitting(false);
         setAddModalOpen(false);
         resetForm();
-      }, 1000);
+      }, 700);
     } else {
-      setFormError("Failed to persist department.");
+      setIsSubmitting(false);
+      setFormError("Failed to create department. Ensure the department name and code are unique.");
+      showError("Could not create department. Please verify name and code uniqueness.");
     }
   };
 
   const handleEditSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting || !selectedDept) return;
     setFormError("");
     setFormSuccess("");
+    setFieldErrors({});
 
-    if (!deptName.trim() || !deptCode.trim()) {
-      setFormError("Department Name and Code are required.");
-      return;
-    }
-
-    if (!selectedDept) return;
-
-    // Safeguard: Check if trying to deactivate a department with active assigned employees
-    if (deptStatus === "Inactive") {
-      const assignedActiveEmps = employees.filter(emp => emp.departmentId === selectedDept.id && emp.status === "Active").length;
-      if (assignedActiveEmps > 0) {
-        setFormError(`Cannot set Department to Inactive: There are ${assignedActiveEmps} active employees assigned. Reassign employees before deactivating.`);
-        return;
-      }
-    }
-
-    // Check uniqueness excluding self
-    const nameExists = departments.some(
-      d => d.id !== selectedDept.id && d.name.toLowerCase() === deptName.trim().toLowerCase()
+    const check = validateDepartmentForm(
+      {
+        id: selectedDept.id,
+        name: deptName,
+        code: deptCode,
+        status: deptStatus,
+        parentDepartmentId,
+      },
+      departments,
+      employees,
+      "edit"
     );
-    const codeExists = departments.some(
-      d => d.id !== selectedDept.id && d.code.toLowerCase() === deptCode.trim().toLowerCase()
-    );
-
-    if (nameExists) {
-      setFormError(`Department Name '${deptName}' is already taken.`);
-      return;
-    }
-    if (codeExists) {
-      setFormError(`Department Code '${deptCode}' is already taken.`);
+    if (!check.valid) {
+      setFieldErrors(check.errors);
+      setFormError(check.summaryMessage || "Please correct the highlighted fields.");
+      focusFirstInvalidField(check.errors);
       return;
     }
 
+    setIsSubmitting(true);
     const updatedDept: Department = {
       ...selectedDept,
       name: deptName.trim(),
@@ -200,6 +201,7 @@ export default function Departments({
 
     onUpdateDepartment(updatedDept);
     setFormSuccess("Department updated successfully!");
+    showSuccess(`Department "${updatedDept.name}" updated.`);
     onLogAction(
       "Departments",
       "Department Updated",
@@ -207,34 +209,40 @@ export default function Departments({
       `Updated department options for ${updatedDept.name}`
     );
     setTimeout(() => {
+      setIsSubmitting(false);
       setEditModalOpen(false);
-    }, 1000);
+    }, 700);
   };
 
   const handleDelete = (dept: Department) => {
-    // Integrity Safeguard: verify if employees are assigned
     const assignedCount = employees.filter(emp => emp.departmentId === dept.id).length;
-    
+
     if (assignedCount > 0) {
-      alert(
-        `CRITICAL SAFEGUARD: Cannot delete/remove Department '${dept.name}'.\n` +
-        `There are currently ${assignedCount} employee folders assigned to this department.\n` +
-        `Please reassign them to another department first.`
+      showError(
+        `Cannot delete "${dept.name}" because ${assignedCount} employee(s) are still assigned to it. Reassign those employees first.`,
+        "Department Deletion Blocked"
       );
       return;
     }
 
-    const confirmCheck = window.confirm(`Are you absolutely sure you want to permanently delete '${dept.name}'? This action cannot be undone.`);
-    if (confirmCheck) {
-      const ok = onDeleteDepartment(dept.id);
-      if (ok) {
-        onLogAction(
-          "Departments",
-          "Department Deleted",
-          dept.code,
-          `Permanently deleted department: ${dept.name}`
-        );
-      }
+    setConfirmDeleteDept(dept);
+  };
+
+  const executeDeleteDepartment = () => {
+    if (!confirmDeleteDept) return;
+    const dept = confirmDeleteDept;
+    setConfirmDeleteDept(null);
+    const ok = onDeleteDepartment(dept.id);
+    if (ok) {
+      showSuccess(`Department "${dept.name}" permanently deleted.`);
+      onLogAction(
+        "Departments",
+        "Department Deleted",
+        dept.code,
+        `Permanently deleted department: ${dept.name}`
+      );
+    } else {
+      showError(`Unable to delete department "${dept.name}". Check permissions or active employee links.`);
     }
   };
 
@@ -445,11 +453,9 @@ export default function Departments({
               </button>
             </div>
 
-            <form onSubmit={handleAddSubmit} className="p-5 space-y-4">
-              {formError && (
-                <div className="p-3 bg-rose-50 text-rose-800 border border-rose-200 rounded-lg text-xs font-semibold">
-                  {formError}
-                </div>
+            <form onSubmit={handleAddSubmit} noValidate className="p-5 space-y-4">
+              {(formError || Object.keys(fieldErrors).length > 0) && (
+                <ValidationSummary errors={fieldErrors} message={formError} />
               )}
               {formSuccess && (
                 <div className="p-3 bg-emerald-50 text-emerald-800 border border-emerald-200 rounded-lg text-xs font-semibold">
@@ -458,39 +464,52 @@ export default function Departments({
               )}
 
               <div className="space-y-1">
-                <label className="block text-xs font-bold text-slate-700">Department Name *</label>
+                <label className="block text-xs font-bold text-slate-700">Department Name <span className="text-rose-500">*</span></label>
                 <input
+                  data-field="name"
                   type="text"
                   placeholder="e.g. Human Resource &amp; Admin"
                   value={deptName}
-                  onChange={(e) => setDeptName(e.target.value)}
-                  className="w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom"
-                  required
+                  onChange={(e) => {
+                    setDeptName(e.target.value);
+                    if (fieldErrors.name) setFieldErrors(p => ({ ...p, name: "" }));
+                  }}
+                  className={fieldInputClass(Boolean(fieldErrors.name), "w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom")}
                 />
+                <FormFieldError error={fieldErrors.name} />
               </div>
 
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-1">
-                  <label className="block text-xs font-bold text-slate-700">Department Code *</label>
+                  <label className="block text-xs font-bold text-slate-700">Department Code <span className="text-rose-500">*</span></label>
                   <input
+                    data-field="code"
                     type="text"
                     placeholder="e.g. HRAD"
                     value={deptCode}
-                    onChange={(e) => setDeptCode(e.target.value)}
-                    className="w-full px-3 py-2 border rounded-lg text-xs font-bold ring-primary-custom uppercase"
-                    required
+                    onChange={(e) => {
+                      setDeptCode(e.target.value);
+                      if (fieldErrors.code) setFieldErrors(p => ({ ...p, code: "" }));
+                    }}
+                    className={fieldInputClass(Boolean(fieldErrors.code), "w-full px-3 py-2 border rounded-lg text-xs font-bold ring-primary-custom uppercase")}
                   />
+                  <FormFieldError error={fieldErrors.code} />
                 </div>
                 <div className="space-y-1">
                   <label className="block text-xs font-bold text-slate-700">Initial Status</label>
                   <select
+                    data-field="status"
                     value={deptStatus}
-                    onChange={(e) => setDeptStatus(e.target.value as any)}
-                    className="w-full px-3 py-2 border rounded-lg text-xs bg-white ring-primary-custom"
+                    onChange={(e) => {
+                      setDeptStatus(e.target.value as any);
+                      if (fieldErrors.status) setFieldErrors(p => ({ ...p, status: "" }));
+                    }}
+                    className={fieldInputClass(Boolean(fieldErrors.status), "w-full px-3 py-2 border rounded-lg text-xs bg-white ring-primary-custom")}
                   >
                     <option value="Active">Active</option>
                     <option value="Inactive">Inactive</option>
                   </select>
+                  <FormFieldError error={fieldErrors.status} />
                 </div>
               </div>
 
@@ -513,9 +532,13 @@ export default function Departments({
                 <div className="space-y-1">
                   <label className="block text-xs font-bold text-slate-700">Parent Department</label>
                   <select
+                    data-field="parentDepartmentId"
                     value={parentDepartmentId}
-                    onChange={(e) => setParentDepartmentId(e.target.value)}
-                    className="w-full px-3 py-2 border rounded-lg text-xs bg-white ring-primary-custom"
+                    onChange={(e) => {
+                      setParentDepartmentId(e.target.value);
+                      if (fieldErrors.parentDepartmentId) setFieldErrors(p => ({ ...p, parentDepartmentId: "" }));
+                    }}
+                    className={fieldInputClass(Boolean(fieldErrors.parentDepartmentId), "w-full px-3 py-2 border rounded-lg text-xs bg-white ring-primary-custom")}
                   >
                     <option value="">-- Top Level (Root) --</option>
                     {departments.filter(d => d.status === "Active").map(d => (
@@ -524,6 +547,7 @@ export default function Departments({
                       </option>
                     ))}
                   </select>
+                  <FormFieldError error={fieldErrors.parentDepartmentId} />
                 </div>
               </div>
 
@@ -548,10 +572,11 @@ export default function Departments({
                 </button>
                 <button
                   type="submit"
-                  className="px-3.5 py-1.5 text-xs font-extrabold text-white bg-primary-custom hover:opacity-95 rounded-lg flex items-center gap-1"
+                  disabled={isSubmitting}
+                  className="px-3.5 py-1.5 text-xs font-extrabold text-white bg-primary-custom hover:opacity-95 rounded-lg flex items-center gap-1 disabled:opacity-50"
                 >
                   <Save className="h-4 w-4 text-accent-custom" />
-                  Save Department
+                  {isSubmitting ? "Saving..." : "Save Department"}
                 </button>
               </div>
             </form>
@@ -570,11 +595,9 @@ export default function Departments({
               </button>
             </div>
 
-            <form onSubmit={handleEditSubmit} className="p-5 space-y-4">
-              {formError && (
-                <div className="p-3 bg-rose-50 text-rose-800 border border-rose-200 rounded-lg text-xs font-semibold">
-                  {formError}
-                </div>
+            <form onSubmit={handleEditSubmit} noValidate className="p-5 space-y-4">
+              {(formError || Object.keys(fieldErrors).length > 0) && (
+                <ValidationSummary errors={fieldErrors} message={formError} />
               )}
               {formSuccess && (
                 <div className="p-3 bg-emerald-50 text-emerald-800 border border-emerald-200 rounded-lg text-xs font-semibold">
@@ -583,37 +606,50 @@ export default function Departments({
               )}
 
               <div className="space-y-1">
-                <label className="block text-xs font-bold text-slate-700">Department Name *</label>
+                <label className="block text-xs font-bold text-slate-700">Department Name <span className="text-rose-500">*</span></label>
                 <input
+                  data-field="name"
                   type="text"
                   value={deptName}
-                  onChange={(e) => setDeptName(e.target.value)}
-                  className="w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom"
-                  required
+                  onChange={(e) => {
+                    setDeptName(e.target.value);
+                    if (fieldErrors.name) setFieldErrors(p => ({ ...p, name: "" }));
+                  }}
+                  className={fieldInputClass(Boolean(fieldErrors.name), "w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom")}
                 />
+                <FormFieldError error={fieldErrors.name} />
               </div>
 
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-1">
-                  <label className="block text-xs font-bold text-slate-700">Department Code *</label>
+                  <label className="block text-xs font-bold text-slate-700">Department Code <span className="text-rose-500">*</span></label>
                   <input
+                    data-field="code"
                     type="text"
                     value={deptCode}
-                    onChange={(e) => setDeptCode(e.target.value)}
-                    className="w-full px-3 py-2 border rounded-lg text-xs font-bold ring-primary-custom uppercase"
-                    required
+                    onChange={(e) => {
+                      setDeptCode(e.target.value);
+                      if (fieldErrors.code) setFieldErrors(p => ({ ...p, code: "" }));
+                    }}
+                    className={fieldInputClass(Boolean(fieldErrors.code), "w-full px-3 py-2 border rounded-lg text-xs font-bold ring-primary-custom uppercase")}
                   />
+                  <FormFieldError error={fieldErrors.code} />
                 </div>
                 <div className="space-y-1">
                   <label className="block text-xs font-bold text-slate-700">Status</label>
                   <select
+                    data-field="status"
                     value={deptStatus}
-                    onChange={(e) => setDeptStatus(e.target.value as any)}
-                    className="w-full px-3 py-2 border rounded-lg text-xs bg-white ring-primary-custom"
+                    onChange={(e) => {
+                      setDeptStatus(e.target.value as any);
+                      if (fieldErrors.status) setFieldErrors(p => ({ ...p, status: "" }));
+                    }}
+                    className={fieldInputClass(Boolean(fieldErrors.status), "w-full px-3 py-2 border rounded-lg text-xs bg-white ring-primary-custom")}
                   >
                     <option value="Active">Active</option>
                     <option value="Inactive">Inactive</option>
                   </select>
+                  <FormFieldError error={fieldErrors.status} />
                 </div>
               </div>
 
@@ -636,9 +672,13 @@ export default function Departments({
                 <div className="space-y-1">
                   <label className="block text-xs font-bold text-slate-700">Parent Department</label>
                   <select
+                    data-field="parentDepartmentId"
                     value={parentDepartmentId}
-                    onChange={(e) => setParentDepartmentId(e.target.value)}
-                    className="w-full px-3 py-2 border rounded-lg text-xs bg-white ring-primary-custom"
+                    onChange={(e) => {
+                      setParentDepartmentId(e.target.value);
+                      if (fieldErrors.parentDepartmentId) setFieldErrors(p => ({ ...p, parentDepartmentId: "" }));
+                    }}
+                    className={fieldInputClass(Boolean(fieldErrors.parentDepartmentId), "w-full px-3 py-2 border rounded-lg text-xs bg-white ring-primary-custom")}
                   >
                     <option value="">-- Top Level (Root) --</option>
                     {departments.filter(d => d.status === "Active" && d.id !== selectedDept?.id).map(d => (
@@ -647,6 +687,7 @@ export default function Departments({
                       </option>
                     ))}
                   </select>
+                  <FormFieldError error={fieldErrors.parentDepartmentId} />
                 </div>
               </div>
 
@@ -670,16 +711,33 @@ export default function Departments({
                 </button>
                 <button
                   type="submit"
-                  className="px-3.5 py-1.5 text-xs font-extrabold text-white bg-primary-custom hover:opacity-95 rounded-lg flex items-center gap-1"
+                  disabled={isSubmitting}
+                  className="px-3.5 py-1.5 text-xs font-extrabold text-white bg-primary-custom hover:opacity-95 rounded-lg flex items-center gap-1 disabled:opacity-50"
                 >
                   <Save className="h-4 w-4 text-accent-custom" />
-                  Save Changes
+                  {isSubmitting ? "Saving..." : "Save Changes"}
                 </button>
               </div>
             </form>
           </div>
         </div>
       )}
+
+      <ConfirmDialog
+        isOpen={Boolean(confirmDeleteDept)}
+        title="Delete Department"
+        message={
+          confirmDeleteDept ? (
+            <>
+              Are you sure you want to permanently delete department <strong>{confirmDeleteDept.name}</strong> ({confirmDeleteDept.code})? This action cannot be undone.
+            </>
+          ) : null
+        }
+        confirmText="Delete Department"
+        variant="danger"
+        onConfirm={executeDeleteDepartment}
+        onCancel={() => setConfirmDeleteDept(null)}
+      />
     </div>
   );
 }

@@ -1,27 +1,43 @@
-import React, { useState } from "react";
-import { User, UserRole } from "../types";
-import { Bell, HelpCircle, LogOut, User as UserIcon, Lock, Menu, X, Check, Save, ShieldCheck } from "lucide-react";
+import React, { useState, useMemo } from "react";
+import { User, EmployeeNotification } from "../types";
+import { Bell, HelpCircle, LogOut, User as UserIcon, Lock, Menu, X, Save, ShieldCheck } from "lucide-react";
+import { useToast } from "./ui/ToastProvider";
+import { FormFieldError, ValidationSummary, fieldInputClass } from "./ui/FormFeedback";
+import { validatePasswordChangeForm, isValidEmail, isAuthorizedCompanyEmail, focusFirstInvalidField } from "../utils/validation";
 
 interface HeaderProps {
   currentUser: User | null;
   companyName: string;
   logoUrl: string;
+  notifications?: EmployeeNotification[];
+  showHelpShortcut?: boolean;
+  onMarkNotificationRead?: (notificationId: string) => void;
+  onOpenNotifications?: () => void;
+  onNavigateToProfile?: () => void;
   onLogout: () => void;
   onOpenHelp: () => void;
   onToggleSidebar: () => void;
   onUpdateOwnProfile: (fullName: string, email: string) => boolean;
-  onUpdateOwnPassword: (oldPass: string, newPass: string) => boolean;
+  onUpdateOwnPassword: (
+    oldPass: string,
+    newPass: string
+  ) => Promise<{ ok: boolean; error?: string }> | boolean;
 }
 
 export default function Header({
   currentUser,
   companyName,
   logoUrl,
+  notifications = [],
+  showHelpShortcut = true,
+  onMarkNotificationRead,
+  onOpenNotifications,
+  onNavigateToProfile,
   onLogout,
   onOpenHelp,
   onToggleSidebar,
   onUpdateOwnProfile,
-  onUpdateOwnPassword
+  onUpdateOwnPassword,
 }: HeaderProps) {
   const [profileOpen, setProfileOpen] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
@@ -34,55 +50,107 @@ export default function Header({
   const [oldPassword, setOldPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
+  const [isUpdatingPass, setIsUpdatingPass] = useState(false);
 
+  const { showSuccess, showError } = useToast();
   const [notifMessage, setNotifMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
 
-  const mockNotifications = [
-    { id: 1, text: "Welcome back! Keep Ethio-Re safe.", time: "Just now" },
-    { id: 2, text: "September Public Holidays synchronized.", time: "1 day ago" },
-    { id: 3, text: "System Audit Logs automatically backed up.", time: "2 days ago" }
-  ];
+  const isEmployee = currentUser?.role === "Employee";
+
+  const isNotifRead = (n: EmployeeNotification): boolean => {
+    if (!currentUser) return true;
+    if (n.category === "announcement") {
+      return Boolean(n.readByUserIds?.includes(currentUser.id));
+    }
+    return Boolean(n.isRead);
+  };
+
+  const unreadCount = useMemo(
+    () => notifications.filter((n) => !isNotifRead(n)).length,
+    [notifications, currentUser?.id]
+  );
 
   const handleSaveProfile = (e: React.FormEvent) => {
     e.preventDefault();
     setNotifMessage(null);
-    if (!profileName.trim() || !profileEmail.trim()) {
-      setNotifMessage({ type: "error", text: "Full Name and Email are required." });
+    const errors: Record<string, string> = {};
+    if (!profileName.trim()) {
+      errors.profileName = "Full name is required.";
+    } else if (profileName.trim().length < 2) {
+      errors.profileName = "Full name must be at least 2 characters.";
+    }
+    if (!profileEmail.trim()) {
+      errors.profileEmail = "Email address is required.";
+    } else if (!isValidEmail(profileEmail)) {
+      errors.profileEmail = "Please enter a valid email address.";
+    } else if (!isAuthorizedCompanyEmail(profileEmail)) {
+      errors.profileEmail = "Email must be an official @ethiopianre.com address.";
+    }
+    if (Object.keys(errors).length > 0) {
+      setFieldErrors(errors);
+      setNotifMessage({ type: "error", text: "Please correct the highlighted fields." });
+      focusFirstInvalidField(errors);
       return;
     }
-    const ok = onUpdateOwnProfile(profileName.trim(), profileEmail.trim());
+
+    const effectiveEmail = isEmployee && currentUser ? currentUser.email : profileEmail.trim();
+    const ok = onUpdateOwnProfile(profileName.trim(), effectiveEmail);
     if (ok) {
+      setFieldErrors({});
       setNotifMessage({ type: "success", text: "Profile details updated successfully." });
-      setTimeout(() => setEditProfileModal(false), 1200);
+      showSuccess("Your account profile has been updated.");
+      setTimeout(() => setEditProfileModal(false), 900);
     } else {
-      setNotifMessage({ type: "error", text: "Email already exists or is invalid." });
+      const msg = "This email address is already assigned to another account.";
+      setFieldErrors({ profileEmail: msg });
+      setNotifMessage({ type: "error", text: msg });
+      showError(msg);
+      focusFirstInvalidField({ profileEmail: msg });
     }
   };
 
-  const handleChangePassword = (e: React.FormEvent) => {
+  const handleChangePassword = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isUpdatingPass) return;
     setNotifMessage(null);
-    if (!oldPassword || !newPassword || !confirmPassword) {
-      setNotifMessage({ type: "error", text: "All fields are required." });
+    const check = validatePasswordChangeForm({
+      oldPassword,
+      newPassword,
+      confirmPassword,
+    });
+    if (!check.valid) {
+      setFieldErrors(check.errors);
+      setNotifMessage({ type: "error", text: check.summaryMessage || "Please correct the highlighted password fields." });
+      focusFirstInvalidField(check.errors);
       return;
     }
-    if (newPassword !== confirmPassword) {
-      setNotifMessage({ type: "error", text: "New passwords do not match." });
-      return;
-    }
-    if (newPassword.length < 5) {
-      setNotifMessage({ type: "error", text: "New password must be at least 5 characters long." });
-      return;
-    }
-    const ok = onUpdateOwnPassword(oldPassword, newPassword);
-    if (ok) {
-      setNotifMessage({ type: "success", text: "Password changed successfully." });
-      setOldPassword("");
-      setNewPassword("");
-      setConfirmPassword("");
-      setTimeout(() => setChangePasswordModal(false), 1200);
-    } else {
-      setNotifMessage({ type: "error", text: "Incorrect current password." });
+
+    setIsUpdatingPass(true);
+    try {
+      const res = await onUpdateOwnPassword(oldPassword, newPassword);
+      const ok = typeof res === "boolean" ? res : res.ok;
+      const errText =
+        typeof res === "object" && res.error
+          ? res.error
+          : "Incorrect current password. Please verify and try again.";
+
+      if (ok) {
+        setFieldErrors({});
+        setNotifMessage({ type: "success", text: "Password changed successfully." });
+        showSuccess("Your password has been updated.");
+        setOldPassword("");
+        setNewPassword("");
+        setConfirmPassword("");
+        setTimeout(() => setChangePasswordModal(false), 900);
+      } else {
+        setFieldErrors({ oldPassword: errText });
+        setNotifMessage({ type: "error", text: errText });
+        showError(errText);
+        focusFirstInvalidField({ oldPassword: errText });
+      }
+    } finally {
+      setIsUpdatingPass(false);
     }
   };
 
@@ -123,39 +191,96 @@ export default function Header({
             }}
             className="p-2 text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-full transition-all relative"
             id="btn-notifications"
+            title="Notifications"
           >
             <Bell className="h-5 w-5" />
-            <span className="absolute top-1 right-1 h-2 w-2 rounded-full bg-amber-500 ring-2 ring-white"></span>
+            {unreadCount > 0 && (
+              <span className="absolute -top-0.5 -right-0.5 min-w-[16px] h-4 px-1 rounded-full bg-amber-500 text-white text-[9px] font-black flex items-center justify-center ring-2 ring-white">
+                {unreadCount > 9 ? "9+" : unreadCount}
+              </span>
+            )}
           </button>
 
           {notifOpen && (
             <div className="absolute right-0 mt-2 w-80 bg-white rounded-lg shadow-xl border border-slate-200 py-2 z-50 animate-in slide-in-from-top-2 duration-150">
               <div className="px-4 py-2 border-b border-slate-100 flex items-center justify-between">
                 <span className="font-bold text-sm text-slate-800">Notifications</span>
-                <span className="text-xs text-amber-500 bg-amber-50 px-2 py-0.5 rounded-full font-semibold">New</span>
+                {unreadCount > 0 ? (
+                  <span className="text-[10px] text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full font-bold">
+                    {unreadCount} Unread
+                  </span>
+                ) : (
+                  <span className="text-[10px] text-slate-400 font-semibold">All caught up</span>
+                )}
               </div>
-              <div className="max-h-60 overflow-y-auto">
-                {mockNotifications.map((n) => (
-                  <div key={n.id} className="px-4 py-3 hover:bg-slate-50 border-b border-slate-50 last:border-0 transition-colors">
-                    <p className="text-xs text-slate-700 leading-tight">{n.text}</p>
-                    <span className="text-[10px] text-slate-400 mt-1 block">{n.time}</span>
+              <div className="max-h-64 overflow-y-auto">
+                {notifications.length === 0 ? (
+                  <div className="px-4 py-6 text-center text-xs text-slate-400">
+                    No notifications or HR announcements at this time.
                   </div>
-                ))}
+                ) : (
+                  notifications.slice(0, 8).map((n) => {
+                    const read = isNotifRead(n);
+                    return (
+                      <button
+                        key={n.id}
+                        type="button"
+                        onClick={() => {
+                          if (!read && onMarkNotificationRead) {
+                            onMarkNotificationRead(n.id);
+                          }
+                          setNotifOpen(false);
+                          if (onOpenNotifications) onOpenNotifications();
+                        }}
+                        className={`w-full text-left px-4 py-3 hover:bg-slate-50 border-b border-slate-50 last:border-0 transition-colors ${
+                          !read ? "bg-amber-50/40" : ""
+                        }`}
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <p className={`text-xs leading-tight ${!read ? "font-bold text-slate-900" : "font-medium text-slate-700"}`}>
+                            {n.title}
+                          </p>
+                          <span className="text-[9px] uppercase font-bold px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 shrink-0">
+                            {n.category === "announcement" ? "HR" : "Personal"}
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-slate-500 mt-1 line-clamp-2">{n.message}</p>
+                        <span className="text-[10px] text-slate-400 mt-1 block">{n.createdDate}</span>
+                      </button>
+                    );
+                  })
+                )}
               </div>
+              {onOpenNotifications && (
+                <div className="px-4 pt-2 border-t border-slate-100">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setNotifOpen(false);
+                      onOpenNotifications();
+                    }}
+                    className="w-full py-1.5 text-center text-xs font-bold text-primary-custom hover:underline"
+                  >
+                    Open Notifications Center
+                  </button>
+                </div>
+              )}
             </div>
           )}
         </div>
 
         {/* Help Center Shortcut */}
-        <button
-          onClick={onOpenHelp}
-          className="p-2 text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-full transition-all flex items-center justify-center gap-1.5"
-          id="btn-header-help"
-          title="Open Help Guides"
-        >
-          <HelpCircle className="h-5 w-5" />
-          <span className="hidden md:inline text-xs font-semibold text-slate-600">Help</span>
-        </button>
+        {showHelpShortcut && (
+          <button
+            onClick={onOpenHelp}
+            className="p-2 text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-full transition-all flex items-center justify-center gap-1.5"
+            id="btn-header-help"
+            title="Open Help Guides"
+          >
+            <HelpCircle className="h-5 w-5" />
+            <span className="hidden md:inline text-xs font-semibold text-slate-600">Help</span>
+          </button>
+        )}
 
         {/* Read-Only Auditor Badge */}
         {currentUser?.role === "Auditor" && (
@@ -199,14 +324,20 @@ export default function Header({
                 <button
                   onClick={() => {
                     setProfileOpen(false);
+                    if (isEmployee && onNavigateToProfile) {
+                      onNavigateToProfile();
+                      return;
+                    }
                     setProfileName(currentUser.fullName);
                     setProfileEmail(currentUser.email);
+                    setFieldErrors({});
+                    setNotifMessage(null);
                     setEditProfileModal(true);
                   }}
                   className="w-full text-left px-4 py-2 text-xs text-slate-700 hover:bg-slate-50 flex items-center gap-2"
                 >
                   <UserIcon className="h-4 w-4 text-slate-400" />
-                  Manage Profile
+                  {isEmployee ? "My Profile" : "Manage Profile"}
                 </button>
 
                 <button
@@ -215,6 +346,8 @@ export default function Header({
                     setOldPassword("");
                     setNewPassword("");
                     setConfirmPassword("");
+                    setFieldErrors({});
+                    setNotifMessage(null);
                     setChangePasswordModal(true);
                   }}
                   className="w-full text-left px-4 py-2 text-xs text-slate-700 hover:bg-slate-50 flex items-center gap-2"
@@ -251,33 +384,43 @@ export default function Header({
                 <X className="h-4 w-4" />
               </button>
             </div>
-            <form onSubmit={handleSaveProfile} className="p-5 space-y-4">
-              {notifMessage && (
-                <div className={`p-3 rounded-lg text-xs font-semibold ${
-                  notifMessage.type === "success" ? "bg-emerald-50 text-emerald-800 border border-emerald-200" : "bg-rose-50 text-rose-800 border border-rose-200"
-                }`}>
+            <form onSubmit={handleSaveProfile} noValidate className="p-5 space-y-4">
+              {notifMessage && notifMessage.type === "success" && (
+                <div className="p-3 rounded-lg text-xs font-semibold bg-emerald-50 text-emerald-800 border border-emerald-200">
                   {notifMessage.text}
                 </div>
               )}
+              {notifMessage && notifMessage.type === "error" && (
+                <ValidationSummary errors={fieldErrors} message={notifMessage.text} />
+              )}
               <div className="space-y-1">
-                <label className="block text-xs font-bold text-slate-700">Full Name</label>
+                <label className="block text-xs font-bold text-slate-700">Full Name <span className="text-rose-500">*</span></label>
                 <input
+                  data-field="profileName"
                   type="text"
                   value={profileName}
-                  onChange={(e) => setProfileName(e.target.value)}
-                  className="w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom"
-                  required
+                  onChange={(e) => {
+                    setProfileName(e.target.value);
+                    if (fieldErrors.profileName) setFieldErrors((p) => ({ ...p, profileName: "" }));
+                  }}
+                  className={fieldInputClass(Boolean(fieldErrors.profileName), "w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom")}
                 />
+                <FormFieldError error={fieldErrors.profileName} />
               </div>
               <div className="space-y-1">
-                <label className="block text-xs font-bold text-slate-700">Email Address</label>
+                <label className="block text-xs font-bold text-slate-700">Email Address <span className="text-rose-500">*</span></label>
                 <input
+                  data-field="profileEmail"
                   type="email"
                   value={profileEmail}
-                  onChange={(e) => setProfileEmail(e.target.value)}
-                  className="w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom"
-                  required
+                  disabled={isEmployee}
+                  onChange={(e) => {
+                    setProfileEmail(e.target.value);
+                    if (fieldErrors.profileEmail) setFieldErrors((p) => ({ ...p, profileEmail: "" }));
+                  }}
+                  className={fieldInputClass(Boolean(fieldErrors.profileEmail), "w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom disabled:bg-slate-100")}
                 />
+                <FormFieldError error={fieldErrors.profileEmail} />
               </div>
 
               <div className="flex justify-end gap-2 pt-2 border-t mt-4">
@@ -311,43 +454,56 @@ export default function Header({
                 <X className="h-4 w-4" />
               </button>
             </div>
-            <form onSubmit={handleChangePassword} className="p-5 space-y-4">
-              {notifMessage && (
-                <div className={`p-3 rounded-lg text-xs font-semibold ${
-                  notifMessage.type === "success" ? "bg-emerald-50 text-emerald-800 border border-emerald-200" : "bg-rose-50 text-rose-800 border border-rose-200"
-                }`}>
+            <form onSubmit={handleChangePassword} noValidate className="p-5 space-y-4">
+              {notifMessage && notifMessage.type === "success" && (
+                <div className="p-3 rounded-lg text-xs font-semibold bg-emerald-50 text-emerald-800 border border-emerald-200">
                   {notifMessage.text}
                 </div>
               )}
+              {notifMessage && notifMessage.type === "error" && (
+                <ValidationSummary errors={fieldErrors} message={notifMessage.text} />
+              )}
               <div className="space-y-1">
-                <label className="block text-xs font-bold text-slate-700">Current Password</label>
+                <label className="block text-xs font-bold text-slate-700">Current Password <span className="text-rose-500">*</span></label>
                 <input
+                  data-field="oldPassword"
                   type="password"
                   value={oldPassword}
-                  onChange={(e) => setOldPassword(e.target.value)}
-                  className="w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom"
-                  required
+                  onChange={(e) => {
+                    setOldPassword(e.target.value);
+                    if (fieldErrors.oldPassword) setFieldErrors((p) => ({ ...p, oldPassword: "" }));
+                  }}
+                  className={fieldInputClass(Boolean(fieldErrors.oldPassword), "w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom")}
                 />
+                <FormFieldError error={fieldErrors.oldPassword} />
               </div>
               <div className="space-y-1">
-                <label className="block text-xs font-bold text-slate-700">New Password</label>
+                <label className="block text-xs font-bold text-slate-700">New Password <span className="text-rose-500">*</span></label>
                 <input
+                  data-field="newPassword"
                   type="password"
                   value={newPassword}
-                  onChange={(e) => setNewPassword(e.target.value)}
-                  className="w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom"
-                  required
+                  onChange={(e) => {
+                    setNewPassword(e.target.value);
+                    if (fieldErrors.newPassword) setFieldErrors((p) => ({ ...p, newPassword: "" }));
+                  }}
+                  className={fieldInputClass(Boolean(fieldErrors.newPassword), "w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom")}
                 />
+                <FormFieldError error={fieldErrors.newPassword} />
               </div>
               <div className="space-y-1">
-                <label className="block text-xs font-bold text-slate-700">Confirm New Password</label>
+                <label className="block text-xs font-bold text-slate-700">Confirm New Password <span className="text-rose-500">*</span></label>
                 <input
+                  data-field="confirmPassword"
                   type="password"
                   value={confirmPassword}
-                  onChange={(e) => setConfirmPassword(e.target.value)}
-                  className="w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom"
-                  required
+                  onChange={(e) => {
+                    setConfirmPassword(e.target.value);
+                    if (fieldErrors.confirmPassword) setFieldErrors((p) => ({ ...p, confirmPassword: "" }));
+                  }}
+                  className={fieldInputClass(Boolean(fieldErrors.confirmPassword), "w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom")}
                 />
+                <FormFieldError error={fieldErrors.confirmPassword} />
               </div>
 
               <div className="flex justify-end gap-2 pt-2 border-t mt-4">
@@ -360,10 +516,11 @@ export default function Header({
                 </button>
                 <button
                   type="submit"
-                  className="px-3 py-1.5 text-xs font-semibold text-white bg-primary-custom hover:opacity-90 rounded-lg flex items-center gap-1.5"
+                  disabled={isUpdatingPass}
+                  className="px-3 py-1.5 text-xs font-semibold text-white bg-primary-custom hover:opacity-90 rounded-lg flex items-center gap-1.5 disabled:opacity-60"
                 >
                   <Lock className="h-3.5 w-3.5" />
-                  Update Password
+                  {isUpdatingPass ? "Updating..." : "Update Password"}
                 </button>
               </div>
             </form>

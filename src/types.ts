@@ -4,6 +4,8 @@ export type EmploymentStatus = "Active" | "Inactive";
 export type AttendanceStatus = "Present" | "Absent" | "Late" | "On Leave" | "Half Day" | "Other";
 export type LeaveStatus = "Active" | "Completed" | "Cancelled";
 
+export type DataScope = "own" | "team" | "all";
+
 export interface ActionPermissions {
   view: boolean;
   create: boolean;
@@ -17,12 +19,21 @@ export interface ModulePermission {
   enabled: boolean;
   actions: ActionPermissions;
   submenus: { [submenuId: string]: boolean };
+  dataScope?: DataScope;
+}
+
+export interface ModulePermissionOverride {
+  enabled?: boolean;
+  actions?: Partial<ActionPermissions>;
+  submenus?: { [submenuId: string]: boolean };
+  dataScope?: DataScope;
 }
 
 export interface RolePermissions {
   id: string; // Document ID (usually same as roleId)
   roleId: string; // Reference to SystemRole.id
   modulePermissions: { [moduleId: string]: ModulePermission };
+  essMigrated?: boolean;
   updatedBy: string;
   updatedAt: string;
 }
@@ -45,9 +56,81 @@ export interface User {
   role: UserRole;
   status: AccountStatus;
   employeeId?: string; // Optional reference linking system user to Employee Master
+  permissionOverrides?: { [moduleId: string]: ModulePermissionOverride };
   createdDate: string;
   lastLogin?: string;
   emailVerified?: boolean;
+}
+
+export type ESSDocumentCategory =
+  | "Employment Contract"
+  | "Appointment Letter"
+  | "Promotion & Transfer Letter"
+  | "Other Personal HR Document";
+
+export interface DriveAssociation {
+  id: string;
+  fileId: string;
+  fileName: string;
+  mimeType: string;
+  webViewLink: string;
+  targetType: "Employee" | "Department";
+  targetId: string;
+  documentCategory?: ESSDocumentCategory;
+  ownerUid?: string;
+  associatedBy: string;
+  associatedDate: string;
+}
+
+export type HRRequestType = "profile_update" | "attendance_correction" | "general_hr";
+export type HRRequestStatus = "Pending" | "Approved" | "Rejected" | "Cancelled";
+
+export interface HRRequest {
+  id: string;
+  employeeId: string;
+  employeeName: string;
+  employeeEmail?: string;
+  departmentId?: string;
+  ownerUid?: string;
+  requestType: HRRequestType;
+  category: string;
+  subject: string;
+  description: string;
+  proposedProfileChanges?: {
+    phoneNumber?: string;
+    altPhoneNumber?: string;
+    address?: string;
+  };
+  attendanceCorrection?: {
+    date: string;
+    requestedStatus?: AttendanceStatus;
+    requestedCheckIn?: string;
+    requestedCheckOut?: string;
+  };
+  status: HRRequestStatus;
+  submittedDate: string;
+  updatedDate: string;
+  reviewedBy?: string;
+  reviewedDate?: string;
+  reviewComments?: string;
+}
+
+export type NotificationCategory = "personal" | "announcement";
+
+export interface EmployeeNotification {
+  id: string;
+  category: NotificationCategory;
+  recipientEmployeeId?: string;
+  recipientEmail?: string;
+  ownerUid?: string;
+  title: string;
+  message: string;
+  module?: string;
+  relatedRecordId?: string;
+  isRead?: boolean;
+  readByUserIds?: string[];
+  createdBy: string;
+  createdDate: string;
 }
 
 export interface Department {

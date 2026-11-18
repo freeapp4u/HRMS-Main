@@ -19,10 +19,9 @@ export interface SendEmailResponse {
 }
 
 /**
-  * Central Email Sending Utility for Ethio-Re HRMS
-  * Checks global Email Configuration (Enable Email Sending to Registered Employees)
-  * before executing email dispatch.
-  */
+ * Global Email Dispatch Utility for Ethio-Re HRMS
+ * Strictly enforces the Master 'enableEmployeeEmails' configuration toggle.
+ */
 export function sendSystemEmail(options: SendEmailOptions): SendEmailResponse {
   const isEmailSendingEnabled = options.config?.emailSettings?.enableEmployeeEmails ?? true;
   const nowStr = new Date().toISOString().replace("T", " ").substring(0, 19);
@@ -49,8 +48,7 @@ export function sendSystemEmail(options: SendEmailOptions): SendEmailResponse {
     };
   }
 
-  // When Email Sending is ON
-  const successLog: EmailActivityLog = {
+  const sentLog: EmailActivityLog = {
     id: `EMAIL_LOG_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
     recipientEmployeeId: options.recipientEmployeeId || "N/A",
     recipientEmail: options.recipientEmail,
@@ -65,7 +63,7 @@ export function sendSystemEmail(options: SendEmailOptions): SendEmailResponse {
     success: true,
     blocked: false,
     status: "Sent",
-    message: `System-generated email successfully delivered to ${options.recipientEmail} via SMTP ${options.config.emailSettings?.smtpHost || "mail.ethiopianre.com"}.`,
-    logEntry: successLog
+    message: `Email successfully sent to ${options.recipientEmail} via configured SMTP (${options.config.emailSettings?.smtpHost || "smtp.office365.com"}).`,
+    logEntry: sentLog
   };
 }

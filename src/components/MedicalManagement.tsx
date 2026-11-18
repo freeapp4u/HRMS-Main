@@ -16,6 +16,15 @@ import {
   HeartPulse, UserPlus, Users, DollarSign, ExternalLink, ShieldCheck, Stethoscope, Building2, Upload
 } from "lucide-react";
 import { uploadFileToStorage } from "../firebase";
+import {
+  validateMedicalClaimForm,
+  validateMedicalFamilyForm,
+  validateMedicalPolicyForm,
+  validateDocumentUpload,
+  focusFirstInvalidField
+} from "../utils/validation";
+import { FormFieldError, ValidationSummary, fieldInputClass } from "./ui/FormFeedback";
+import { useToast, ConfirmDialog } from "./ui/ToastProvider";
 
 interface MedicalManagementProps {
   medicalExpenses: MedicalExpense[];
@@ -209,16 +218,44 @@ export default function MedicalManagement({
   const [claimRemarks, setClaimRemarks] = useState("");
   const [claimAdminBypass, setClaimAdminBypass] = useState(false);
 
+  const toast = useToast();
   const [claimError, setClaimError] = useState("");
   const [claimSuccess, setClaimSuccess] = useState("");
+  const [claimFieldErrors, setClaimFieldErrors] = useState<Record<string, string>>({});
+  const [isSavingClaim, setIsSavingClaim] = useState(false);
+
+  const [confirmState, setConfirmState] = useState<{
+    isOpen: boolean;
+    title: string;
+    message: React.ReactNode;
+    confirmText: string;
+    variant: "danger" | "warning" | "primary";
+    onConfirm: () => void;
+  } | null>(null);
+
+  const clearClaimFieldError = (key: string) => {
+    setClaimFieldErrors((prev) => {
+      if (!prev[key]) return prev;
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+  };
 
   const handleReceiptFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     setClaimError("");
     setClaimDocUploadStatus("");
-    if (file.size > 10 * 1024 * 1024) {
-      setClaimError("Receipt file exceeds the 10MB limit.");
+    const fileCheck = validateDocumentUpload(file, {
+      maxSizeMB: 10,
+      allowedExtensions: ["pdf", "png", "jpg", "jpeg", "webp"]
+    });
+    if (!fileCheck.valid) {
+      const msg = fileCheck.error || "Invalid receipt file.";
+      setClaimError(msg);
+      toast.showError(msg, "File Validation Error");
+      e.target.value = "";
       return;
     }
     setClaimDocUploading(true);
@@ -227,8 +264,11 @@ export default function MedicalManagement({
       const uploaded = await uploadFileToStorage(`medical_receipts/${targetEmp}`, file);
       setClaimDocUrl(uploaded.url);
       setClaimDocUploadStatus(`Uploaded '${file.name}' to Firebase Storage.`);
+      toast.showSuccess(`Receipt '${file.name}' uploaded successfully.`, "Upload Complete");
     } catch (err: any) {
-      setClaimError(err?.message || "Failed to upload receipt file to Firebase Storage.");
+      const msg = err?.message || "Failed to upload receipt file to Firebase Storage.";
+      setClaimError(msg);
+      toast.showError(msg, "Upload Failed");
     } finally {
       setClaimDocUploading(false);
       e.target.value = "";
@@ -272,10 +312,12 @@ export default function MedicalManagement({
     setClaimInvoiceNo("");
     setClaimAmount("");
     setClaimDocUrl("");
+    setClaimDocUploadStatus("");
     setClaimRemarks("");
     setClaimAdminBypass(false);
     setClaimError("");
     setClaimSuccess("");
+    setClaimFieldErrors({});
   };
 
   const handleOpenClaimAdd = () => {
@@ -295,31 +337,58 @@ export default function MedicalManagement({
     setClaimInvoiceNo(rec.invoiceNumber);
     setClaimAmount(rec.amountETB);
     setClaimDocUrl(rec.supportingDocumentUrl || "");
+    setClaimDocUploadStatus("");
     setClaimRemarks(rec.remarks || "");
     setClaimAdminBypass(false);
     setClaimError("");
     setClaimSuccess("");
+    setClaimFieldErrors({});
     setClaimModalOpen(true);
   };
 
-  const handleSaveClaimSubmit = (e: React.FormEvent) => {
+  const handleSaveClaimSubmit = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
+    if (isSavingClaim) return;
     setClaimError("");
     setClaimSuccess("");
 
-    if (!claimEmpId || !claimService.trim() || !claimFacility.trim() || !claimDate || !claimAmount || Number(claimAmount) <= 0) {
-      setClaimError("Please fill out all required fields with a valid expense amount in ETB.");
-      return;
-    }
+    const existingInvoices = medicalExpenses
+      .filter((m) => !selectedClaim || m.id !== selectedClaim.id)
+      .map((m) => m.invoiceNumber)
+      .filter(Boolean);
 
-    if (medicalPolicy.requiresInvoiceNumber && !claimInvoiceNo.trim()) {
-      setClaimError("Company policy requires a valid Invoice / Receipt Number.");
+    const validation = validateMedicalClaimForm({
+      employeeId: claimEmpId,
+      beneficiaryType: claimBenType,
+      familyMemberId: claimFamilyMemberId,
+      medicalService: claimService,
+      facilityName: claimFacility,
+      expenseDate: claimDate,
+      invoiceNumber: claimInvoiceNo,
+      amountETB: claimAmount === "" ? "" : String(claimAmount),
+      familyMembers,
+      policy: medicalPolicy,
+      remainingFamilyAllocation:
+        claimBenType === "Family Member" && !claimAdminBypass
+          ? selectedEmpFamilyAllocationState.remaining
+          : undefined,
+      existingInvoiceNumbers: existingInvoices,
+      mode: selectedClaim ? "edit" : "add"
+    });
+
+    if (!validation.valid) {
+      setClaimFieldErrors(validation.errors);
+      setClaimError(validation.summaryMessage || "Please correct the highlighted fields.");
+      focusFirstInvalidField(validation.errors, e.currentTarget);
       return;
     }
 
     const empObj = employees.find(e => e.employeeId === claimEmpId);
     if (!empObj) {
-      setClaimError("Invalid Employee ID.");
+      const msg = "Invalid Employee ID.";
+      setClaimFieldErrors({ claimEmpId: msg });
+      setClaimError(msg);
+      focusFirstInvalidField({ claimEmpId: msg }, e.currentTarget);
       return;
     }
 
@@ -329,19 +398,18 @@ export default function MedicalManagement({
     if (claimBenType === "Family Member") {
       const famObj = familyMembers.find(f => f.id === claimFamilyMemberId);
       if (!famObj) {
-        setClaimError("Please select an eligible family member beneficiary.");
+        const msg = "Please select an eligible family member beneficiary.";
+        setClaimFieldErrors({ claimFamilyMemberId: msg });
+        setClaimError(msg);
+        focusFirstInvalidField({ claimFamilyMemberId: msg }, e.currentTarget);
         return;
       }
       benName = famObj.fullName;
       rel = famObj.relationship;
-
-      // Allocation check
-      const amt = Number(claimAmount);
-      if (amt > selectedEmpFamilyAllocationState.remaining && !claimAdminBypass) {
-        setClaimError(`Medical expense of ${amt.toLocaleString()} ETB exceeds the employee's remaining family allocation of ${selectedEmpFamilyAllocationState.remaining.toLocaleString()} ETB.`);
-        return;
-      }
     }
+
+    setClaimFieldErrors({});
+    setIsSavingClaim(true);
 
     const newClaim: MedicalExpense = {
       id: selectedClaim ? selectedClaim.id : `MED_${Date.now()}`,
@@ -365,29 +433,44 @@ export default function MedicalManagement({
 
     if (selectedClaim) {
       onUpdateMedicalExpense(newClaim);
+      setIsSavingClaim(false);
       setClaimSuccess("Medical expense claim updated successfully!");
+      toast.showSuccess(`Updated medical claim #${newClaim.invoiceNumber} (${newClaim.amountETB.toLocaleString()} ETB).`, "Claim Updated");
       onLogAction("Medical", "Update Expense Claim", newClaim.id, `Updated claim for ${newClaim.beneficiaryName} (${newClaim.amountETB} ETB)`);
+      setClaimModalOpen(false);
     } else {
       const ok = onAddMedicalExpense(newClaim);
+      setIsSavingClaim(false);
       if (ok) {
         setClaimSuccess("Medical expense claim recorded successfully!");
+        toast.showSuccess(`Recorded claim #${newClaim.invoiceNumber} (${newClaim.amountETB.toLocaleString()} ETB).`, "Claim Recorded");
         onLogAction("Medical", "Create Expense Claim", newClaim.id, `Recorded medical claim of ${newClaim.amountETB} ETB for ${newClaim.beneficiaryName} at ${newClaim.facilityName}`);
+        setClaimModalOpen(false);
       } else {
         setClaimError("Could not save claim record.");
       }
     }
-
-    setTimeout(() => {
-      setClaimModalOpen(false);
-    }, 1000);
   };
 
   const handleDeleteClaim = (rec: MedicalExpense) => {
-    const confirmCheck = window.confirm(`Are you sure you want to delete medical expense claim #${rec.invoiceNumber} (${rec.amountETB.toLocaleString()} ETB)?`);
-    if (confirmCheck) {
-      onDeleteMedicalExpense(rec.id);
-      onLogAction("Medical", "Delete Expense Claim", rec.id, `Deleted claim #${rec.invoiceNumber} for ${rec.beneficiaryName}`);
-    }
+    setConfirmState({
+      isOpen: true,
+      title: "Delete Medical Expense Claim",
+      message: (
+        <span>
+          Permanently delete medical expense claim <strong>#{rec.invoiceNumber || rec.id}</strong> for{" "}
+          <strong>{rec.beneficiaryName}</strong> ({rec.amountETB.toLocaleString()} ETB)?
+        </span>
+      ),
+      confirmText: "Delete Claim",
+      variant: "danger",
+      onConfirm: () => {
+        onDeleteMedicalExpense(rec.id);
+        onLogAction("Medical", "Delete Expense Claim", rec.id, `Deleted claim #${rec.invoiceNumber} for ${rec.beneficiaryName}`);
+        toast.showSuccess(`Deleted claim #${rec.invoiceNumber || rec.id}.`, "Claim Deleted");
+        setConfirmState(null);
+      }
+    });
   };
 
   // ==========================================
@@ -412,6 +495,17 @@ export default function MedicalManagement({
 
   const [famError, setFamError] = useState("");
   const [famSuccess, setFamSuccess] = useState("");
+  const [famFieldErrors, setFamFieldErrors] = useState<Record<string, string>>({});
+  const [isSavingFam, setIsSavingFam] = useState(false);
+
+  const clearFamFieldError = (key: string) => {
+    setFamFieldErrors((prev) => {
+      if (!prev[key]) return prev;
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+  };
 
   const resetFamForm = () => {
     setFamEmpId(activeEmployees[0]?.employeeId || "");
@@ -424,6 +518,7 @@ export default function MedicalManagement({
     setFamStatus("Active");
     setFamError("");
     setFamSuccess("");
+    setFamFieldErrors({});
   };
 
   const handleOpenFamAdd = (empId?: string) => {
@@ -445,24 +540,43 @@ export default function MedicalManagement({
     setFamStatus(fam.status);
     setFamError("");
     setFamSuccess("");
+    setFamFieldErrors({});
     setFamModalOpen(true);
   };
 
-  const handleSaveFamSubmit = (e: React.FormEvent) => {
+  const handleSaveFamSubmit = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
+    if (isSavingFam) return;
     setFamError("");
     setFamSuccess("");
 
-    if (!famEmpId || !famFullName.trim() || !famDob) {
-      setFamError("Please fill out all required fields for the family member.");
+    const validation = validateMedicalFamilyForm({
+      employeeId: famEmpId,
+      fullName: famFullName,
+      relationship: famRelationship,
+      gender: famGender,
+      dob: famDob,
+      phoneNumber: famPhone
+    });
+
+    if (!validation.valid) {
+      setFamFieldErrors(validation.errors);
+      setFamError(validation.summaryMessage || "Please correct the highlighted fields.");
+      focusFirstInvalidField(validation.errors, e.currentTarget);
       return;
     }
 
     const empObj = employees.find(e => e.employeeId === famEmpId);
     if (!empObj) {
-      setFamError("Invalid Employee ID.");
+      const msg = "Invalid Employee ID.";
+      setFamFieldErrors({ famEmpId: msg });
+      setFamError(msg);
+      focusFirstInvalidField({ famEmpId: msg }, e.currentTarget);
       return;
     }
+
+    setFamFieldErrors({});
+    setIsSavingFam(true);
 
     const newFam: FamilyMember = {
       id: selectedFam ? selectedFam.id : `FAM_${Date.now()}`,
@@ -480,31 +594,45 @@ export default function MedicalManagement({
 
     if (selectedFam) {
       onUpdateFamilyMember(newFam);
+      setIsSavingFam(false);
       setFamSuccess("Family member record updated!");
+      toast.showSuccess(`Updated family dependent ${newFam.fullName}.`, "Family Member Updated");
       onLogAction("Medical", "Update Family Member", newFam.id, `Updated family record of ${newFam.fullName} (${newFam.relationship}) for employee ${empObj.fullName}`);
+      setFamModalOpen(false);
     } else {
       const ok = onAddFamilyMember(newFam);
+      setIsSavingFam(false);
       if (ok) {
         setFamSuccess("Family member registered successfully!");
+        toast.showSuccess(`Registered ${newFam.fullName} (${newFam.relationship}) for ${empObj.fullName}.`, "Family Member Added");
         onLogAction("Medical", "Create Family Member", newFam.id, `Registered family member ${newFam.fullName} (${newFam.relationship}) for employee ${empObj.fullName}`);
+        setFamModalOpen(false);
       } else {
         setFamError("Could not save family record.");
       }
     }
-
-    setTimeout(() => {
-      setFamModalOpen(false);
-    }, 1000);
   };
 
   const handleToggleFamStatus = (fam: FamilyMember) => {
     const updatedStatus = fam.status === "Active" ? "Inactive" : "Active";
-    const confirmCheck = window.confirm(`Change ${fam.fullName}'s status to ${updatedStatus}?`);
-    if (confirmCheck) {
-      const updated = { ...fam, status: updatedStatus as any, updatedDate: new Date().toISOString().replace("T", " ").substring(0, 19) };
-      onUpdateFamilyMember(updated);
-      onLogAction("Medical", "Toggle Family Status", fam.id, `Set status of ${fam.fullName} to ${updatedStatus}`);
-    }
+    setConfirmState({
+      isOpen: true,
+      title: `${updatedStatus === "Inactive" ? "Deactivate" : "Activate"} Family Member`,
+      message: (
+        <span>
+          Change <strong>{fam.fullName}</strong>&apos;s medical benefit status to <strong>{updatedStatus}</strong>?
+        </span>
+      ),
+      confirmText: `Set ${updatedStatus}`,
+      variant: updatedStatus === "Inactive" ? "warning" : "primary",
+      onConfirm: () => {
+        const updated = { ...fam, status: updatedStatus as any, updatedDate: new Date().toISOString().replace("T", " ").substring(0, 19) };
+        onUpdateFamilyMember(updated);
+        onLogAction("Medical", "Toggle Family Status", fam.id, `Set status of ${fam.fullName} to ${updatedStatus}`);
+        toast.showInfo(`${fam.fullName} is now ${updatedStatus}.`, "Status Updated");
+        setConfirmState(null);
+      }
+    });
   };
 
   // ==========================================
@@ -512,13 +640,21 @@ export default function MedicalManagement({
   // ==========================================
   const [polDefaultAlloc, setPolDefaultAlloc] = useState<number>(medicalPolicy.defaultFamilyAllocationETB);
   const [polReqInvoice, setPolReqInvoice] = useState<boolean>(medicalPolicy.requiresInvoiceNumber);
+  const [polErrors, setPolErrors] = useState<Record<string, string>>({});
 
-  const handleSavePolicySubmit = (e: React.FormEvent) => {
+  const handleSavePolicySubmit = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    if (polDefaultAlloc < 0) {
-      alert("Allocation amount must be a positive number.");
+    const validation = validateMedicalPolicyForm({
+      defaultFamilyAllocationETB: Number(polDefaultAlloc),
+      currencySymbol: medicalPolicy.currencySymbol || "ETB"
+    });
+    if (!validation.valid) {
+      setPolErrors(validation.errors);
+      focusFirstInvalidField(validation.errors, e.currentTarget);
+      toast.showWarning(validation.summaryMessage || "Invalid policy configuration.", "Validation Error");
       return;
     }
+    setPolErrors({});
 
     const updatedConfig: CompanyConfig = {
       ...companyConfig,
@@ -533,7 +669,7 @@ export default function MedicalManagement({
 
     onUpdateConfig(updatedConfig);
     onLogAction("MedicalPolicy", "Update Policy", "Family Allocation", `Updated default family aggregate allocation to ${Number(polDefaultAlloc).toLocaleString()} ETB per employee`);
-    alert("Medical Benefit Policy updated successfully!");
+    toast.showSuccess("Medical Benefit Policy updated successfully!", "Policy Saved");
   };
 
   // ==========================================
@@ -1231,9 +1367,24 @@ export default function MedicalManagement({
                                 {canDelete && (
                                   <button
                                     onClick={() => {
-                                      if (window.confirm(`Are you sure you want to delete family member ${f.fullName}?`)) {
-                                        onDeleteFamilyMember && onDeleteFamilyMember(f.id);
-                                      }
+                                      setConfirmState({
+                                        isOpen: true,
+                                        title: "Delete Family Member",
+                                        message: (
+                                          <span>
+                                            Permanently remove registered dependent <strong>{f.fullName}</strong> ({f.relationship})?
+                                          </span>
+                                        ),
+                                        confirmText: "Delete Member",
+                                        variant: "danger",
+                                        onConfirm: () => {
+                                          const ok = onDeleteFamilyMember ? onDeleteFamilyMember(f.id) : false;
+                                          if (ok) {
+                                            toast.showSuccess(`Removed family member ${f.fullName}.`, "Record Deleted");
+                                          }
+                                          setConfirmState(null);
+                                        }
+                                      });
                                     }}
                                     className="p-1 text-slate-400 hover:text-rose-700 hover:bg-rose-50 rounded"
                                     title="Delete Record"
@@ -1267,19 +1418,28 @@ export default function MedicalManagement({
               <Settings className="h-4 w-4 text-primary-custom" /> Medical Benefit Policy Configuration
             </h3>
 
-            <form onSubmit={handleSavePolicySubmit} className="space-y-4">
+            <form noValidate onSubmit={handleSavePolicySubmit} className="space-y-4">
+              <ValidationSummary errors={polErrors} />
               <div className="space-y-1">
                 <label className="block text-xs font-bold text-slate-700">
                   Default Family Aggregate Medical Allocation (ETB) *
                 </label>
                 <input
                   type="number"
+                  data-field="policyAllocation"
                   value={polDefaultAlloc}
-                  onChange={(e) => setPolDefaultAlloc(Number(e.target.value))}
+                  onChange={(e) => {
+                    setPolDefaultAlloc(Number(e.target.value));
+                    setPolErrors((prev) => {
+                      const next = { ...prev };
+                      delete next.policyAllocation;
+                      return next;
+                    });
+                  }}
                   readOnly={!canEdit}
-                  className="w-full px-3 py-2 border rounded-lg text-xs font-bold ring-primary-custom read-only:bg-slate-50"
-                  required
+                  className={fieldInputClass(!!polErrors.policyAllocation, "w-full px-3 py-2 border rounded-lg text-xs font-bold ring-primary-custom read-only:bg-slate-50")}
                 />
+                <FormFieldError error={polErrors.policyAllocation} />
                 <span className="text-[10px] text-slate-400 block font-medium">
                   This aggregate allocation applies per employee and is shared across all registered family dependents.
                 </span>
@@ -1487,12 +1647,8 @@ export default function MedicalManagement({
               </button>
             </div>
 
-            <form onSubmit={handleSaveClaimSubmit} className="p-5 space-y-4">
-              {claimError && (
-                <div className="p-3 bg-rose-50 text-rose-800 border border-rose-200 rounded-lg text-xs font-semibold">
-                  {claimError}
-                </div>
-              )}
+            <form noValidate onSubmit={handleSaveClaimSubmit} className="p-5 space-y-4 max-h-[82vh] overflow-y-auto">
+              <ValidationSummary errors={claimFieldErrors} message={claimError} />
               {claimSuccess && (
                 <div className="p-3 bg-emerald-50 text-emerald-800 border border-emerald-200 rounded-lg text-xs font-semibold">
                   {claimSuccess}
@@ -1503,28 +1659,35 @@ export default function MedicalManagement({
                 <div className="space-y-1">
                   <label className="block text-xs font-bold text-slate-700">Select Employee *</label>
                   <select
+                    data-field="claimEmpId"
                     value={claimEmpId}
                     onChange={(e) => {
                       setClaimEmpId(e.target.value);
+                      clearClaimFieldError("claimEmpId");
+                      clearClaimFieldError("claimFamilyMemberId");
                       const fams = familyMembers.filter(f => f.employeeId === e.target.value && f.status === "Active");
                       setClaimFamilyMemberId(fams[0]?.id || "");
                     }}
-                    className="w-full px-3 py-1.5 border rounded-lg text-xs font-bold bg-white"
-                    required
+                    className={fieldInputClass(!!claimFieldErrors.claimEmpId, "w-full px-3 py-1.5 border rounded-lg text-xs font-bold bg-white")}
                   >
+                    <option value="">-- Select Employee --</option>
                     {activeEmployees.map(e => (
                       <option key={e.employeeId} value={e.employeeId}>{e.fullName} ({e.employeeId})</option>
                     ))}
                   </select>
+                  <FormFieldError error={claimFieldErrors.claimEmpId} />
                 </div>
 
                 <div className="space-y-1">
                   <label className="block text-xs font-bold text-slate-700">Beneficiary Type *</label>
                   <select
                     value={claimBenType}
-                    onChange={(e) => setClaimBenType(e.target.value as any)}
+                    onChange={(e) => {
+                      setClaimBenType(e.target.value as any);
+                      clearClaimFieldError("claimFamilyMemberId");
+                      clearClaimFieldError("claimAmount");
+                    }}
                     className="w-full px-3 py-1.5 border rounded-lg text-xs font-bold bg-white"
-                    required
                   >
                     <option value="Family Member">Family Member</option>
                     <option value="Employee">Employee (Self)</option>
@@ -1551,11 +1714,15 @@ export default function MedicalManagement({
                     </div>
                   ) : (
                     <select
+                      data-field="claimFamilyMemberId"
                       value={claimFamilyMemberId}
-                      onChange={(e) => setClaimFamilyMemberId(e.target.value)}
-                      className="w-full px-3 py-1.5 border rounded-lg text-xs font-bold bg-white"
-                      required
+                      onChange={(e) => {
+                        setClaimFamilyMemberId(e.target.value);
+                        clearClaimFieldError("claimFamilyMemberId");
+                      }}
+                      className={fieldInputClass(!!claimFieldErrors.claimFamilyMemberId, "w-full px-3 py-1.5 border rounded-lg text-xs font-bold bg-white")}
                     >
+                      <option value="">-- Select Family Member --</option>
                       {availableFamilyMembers.map(f => (
                         <option key={f.id} value={f.id}>
                           {f.fullName} ({f.relationship} • DOB: {f.dob})
@@ -1563,6 +1730,7 @@ export default function MedicalManagement({
                       ))}
                     </select>
                   )}
+                  <FormFieldError error={claimFieldErrors.claimFamilyMemberId} />
                 </div>
               )}
 
@@ -1592,59 +1760,79 @@ export default function MedicalManagement({
                   <label className="block text-xs font-bold text-slate-700">Medical Service / Treatment Description *</label>
                   <input
                     type="text"
+                    data-field="claimService"
                     value={claimService}
-                    onChange={(e) => setClaimService(e.target.value)}
+                    onChange={(e) => {
+                      setClaimService(e.target.value);
+                      clearClaimFieldError("claimService");
+                    }}
                     placeholder="e.g. Outpatient Consultation, Prescriptions, Dental..."
-                    className="w-full px-3 py-1.5 border rounded-lg text-xs font-medium"
-                    required
+                    className={fieldInputClass(!!claimFieldErrors.claimService, "w-full px-3 py-1.5 border rounded-lg text-xs font-medium")}
                   />
+                  <FormFieldError error={claimFieldErrors.claimService} />
                 </div>
 
                 <div className="space-y-1">
                   <label className="block text-xs font-bold text-slate-700">Hospital / Clinic Name *</label>
                   <input
                     type="text"
+                    data-field="claimFacility"
                     value={claimFacility}
-                    onChange={(e) => setClaimFacility(e.target.value)}
+                    onChange={(e) => {
+                      setClaimFacility(e.target.value);
+                      clearClaimFieldError("claimFacility");
+                    }}
                     placeholder="e.g. Nordic Medical Centre"
-                    className="w-full px-3 py-1.5 border rounded-lg text-xs font-medium"
-                    required
+                    className={fieldInputClass(!!claimFieldErrors.claimFacility, "w-full px-3 py-1.5 border rounded-lg text-xs font-medium")}
                   />
+                  <FormFieldError error={claimFieldErrors.claimFacility} />
                 </div>
 
                 <div className="space-y-1">
                   <label className="block text-xs font-bold text-slate-700">Expense Date *</label>
                   <input
                     type="date"
+                    data-field="claimDate"
                     value={claimDate}
-                    onChange={(e) => setClaimDate(e.target.value)}
-                    className="w-full px-3 py-1.5 border rounded-lg text-xs font-bold"
-                    required
+                    onChange={(e) => {
+                      setClaimDate(e.target.value);
+                      clearClaimFieldError("claimDate");
+                    }}
+                    className={fieldInputClass(!!claimFieldErrors.claimDate, "w-full px-3 py-1.5 border rounded-lg text-xs font-bold")}
                   />
+                  <FormFieldError error={claimFieldErrors.claimDate} />
                 </div>
 
                 <div className="space-y-1">
                   <label className="block text-xs font-bold text-slate-700">Invoice / Receipt Number *</label>
                   <input
                     type="text"
+                    data-field="claimInvoice"
                     value={claimInvoiceNo}
-                    onChange={(e) => setClaimInvoiceNo(e.target.value)}
+                    onChange={(e) => {
+                      setClaimInvoiceNo(e.target.value);
+                      clearClaimFieldError("claimInvoice");
+                    }}
                     placeholder="e.g. INV-99012"
-                    className="w-full px-3 py-1.5 border rounded-lg text-xs font-bold"
-                    required={medicalPolicy.requiresInvoiceNumber}
+                    className={fieldInputClass(!!claimFieldErrors.claimInvoice, "w-full px-3 py-1.5 border rounded-lg text-xs font-bold")}
                   />
+                  <FormFieldError error={claimFieldErrors.claimInvoice} />
                 </div>
 
                 <div className="space-y-1">
                   <label className="block text-xs font-bold text-slate-700">Expense Amount (ETB) *</label>
                   <input
                     type="number"
+                    data-field="claimAmount"
                     value={claimAmount}
-                    onChange={(e) => setClaimAmount(e.target.value === "" ? "" : Number(e.target.value))}
+                    onChange={(e) => {
+                      setClaimAmount(e.target.value === "" ? "" : Number(e.target.value));
+                      clearClaimFieldError("claimAmount");
+                    }}
                     placeholder="0.00"
-                    className="w-full px-3 py-1.5 border rounded-lg text-xs font-extrabold text-slate-900"
-                    required
+                    className={fieldInputClass(!!claimFieldErrors.claimAmount, "w-full px-3 py-1.5 border rounded-lg text-xs font-extrabold text-slate-900")}
                   />
+                  <FormFieldError error={claimFieldErrors.claimAmount} />
                 </div>
               </div>
 
@@ -1660,7 +1848,10 @@ export default function MedicalManagement({
                       <input
                         type="checkbox"
                         checked={claimAdminBypass}
-                        onChange={(e) => setClaimAdminBypass(e.target.checked)}
+                        onChange={(e) => {
+                          setClaimAdminBypass(e.target.checked);
+                          clearClaimFieldError("claimAmount");
+                        }}
                       />
                       <span className="font-bold text-slate-800">Bypass Allocation Limit (Admin Override Exemption)</span>
                     </label>
@@ -1713,9 +1904,11 @@ export default function MedicalManagement({
                 </button>
                 <button
                   type="submit"
-                  className="px-3.5 py-1.5 text-xs font-extrabold text-white bg-primary-custom hover:opacity-95 rounded-lg flex items-center gap-1"
+                  disabled={isSavingClaim || claimDocUploading}
+                  className="px-3.5 py-1.5 text-xs font-extrabold text-white bg-primary-custom hover:opacity-95 rounded-lg flex items-center gap-1 disabled:opacity-50"
                 >
-                  <Save className="h-4 w-4 text-accent-custom" /> Save Claim Record
+                  <Save className="h-4 w-4 text-accent-custom" />
+                  <span>{isSavingClaim ? "Saving..." : "Save Claim Record"}</span>
                 </button>
               </div>
             </form>
@@ -1738,12 +1931,8 @@ export default function MedicalManagement({
               </button>
             </div>
 
-            <form onSubmit={handleSaveFamSubmit} className="p-5 space-y-4">
-              {famError && (
-                <div className="p-3 bg-rose-50 text-rose-800 border border-rose-200 rounded-lg text-xs font-semibold">
-                  {famError}
-                </div>
-              )}
+            <form noValidate onSubmit={handleSaveFamSubmit} className="p-5 space-y-4">
+              <ValidationSummary errors={famFieldErrors} message={famError} />
               {famSuccess && (
                 <div className="p-3 bg-emerald-50 text-emerald-800 border border-emerald-200 rounded-lg text-xs font-semibold">
                   {famSuccess}
@@ -1753,37 +1942,49 @@ export default function MedicalManagement({
               <div className="space-y-1">
                 <label className="block text-xs font-bold text-slate-700">Link to Employee *</label>
                 <select
+                  data-field="famEmpId"
                   value={famEmpId}
-                  onChange={(e) => setFamEmpId(e.target.value)}
-                  className="w-full px-3 py-1.5 border rounded-lg text-xs font-bold bg-white"
-                  required
+                  onChange={(e) => {
+                    setFamEmpId(e.target.value);
+                    clearFamFieldError("famEmpId");
+                  }}
+                  className={fieldInputClass(!!famFieldErrors.famEmpId, "w-full px-3 py-1.5 border rounded-lg text-xs font-bold bg-white")}
                 >
+                  <option value="">-- Select Employee --</option>
                   {activeEmployees.map(e => (
                     <option key={e.employeeId} value={e.employeeId}>{e.fullName} ({e.employeeId})</option>
                   ))}
                 </select>
+                <FormFieldError error={famFieldErrors.famEmpId} />
               </div>
 
               <div className="space-y-1">
                 <label className="block text-xs font-bold text-slate-700">Family Member Full Name *</label>
                 <input
                   type="text"
+                  data-field="famFullName"
                   value={famFullName}
-                  onChange={(e) => setFamFullName(e.target.value)}
+                  onChange={(e) => {
+                    setFamFullName(e.target.value);
+                    clearFamFieldError("famFullName");
+                  }}
                   placeholder="Full name of dependent/family member"
-                  className="w-full px-3 py-1.5 border rounded-lg text-xs font-bold"
-                  required
+                  className={fieldInputClass(!!famFieldErrors.famFullName, "w-full px-3 py-1.5 border rounded-lg text-xs font-bold")}
                 />
+                <FormFieldError error={famFieldErrors.famFullName} />
               </div>
 
               <div className="grid grid-cols-2 gap-3">
                 <div className="space-y-1">
                   <label className="block text-xs font-bold text-slate-700">Relationship *</label>
                   <select
+                    data-field="famRelationship"
                     value={famRelationship}
-                    onChange={(e) => setFamRelationship(e.target.value as any)}
-                    className="w-full px-3 py-1.5 border rounded-lg text-xs font-bold bg-white"
-                    required
+                    onChange={(e) => {
+                      setFamRelationship(e.target.value as any);
+                      clearFamFieldError("famRelationship");
+                    }}
+                    className={fieldInputClass(!!famFieldErrors.famRelationship, "w-full px-3 py-1.5 border rounded-lg text-xs font-bold bg-white")}
                   >
                     <option value="Spouse">Spouse</option>
                     <option value="Child">Child</option>
@@ -1791,19 +1992,24 @@ export default function MedicalManagement({
                     <option value="Dependent">Dependent</option>
                     <option value="Other">Other</option>
                   </select>
+                  <FormFieldError error={famFieldErrors.famRelationship} />
                 </div>
 
                 <div className="space-y-1">
                   <label className="block text-xs font-bold text-slate-700">Gender *</label>
                   <select
+                    data-field="famGender"
                     value={famGender}
-                    onChange={(e) => setFamGender(e.target.value as any)}
-                    className="w-full px-3 py-1.5 border rounded-lg text-xs font-bold bg-white"
-                    required
+                    onChange={(e) => {
+                      setFamGender(e.target.value as any);
+                      clearFamFieldError("famGender");
+                    }}
+                    className={fieldInputClass(!!famFieldErrors.famGender, "w-full px-3 py-1.5 border rounded-lg text-xs font-bold bg-white")}
                   >
                     <option value="Female">Female</option>
                     <option value="Male">Male</option>
                   </select>
+                  <FormFieldError error={famFieldErrors.famGender} />
                 </div>
               </div>
 
@@ -1812,22 +2018,31 @@ export default function MedicalManagement({
                   <label className="block text-xs font-bold text-slate-700">Date of Birth *</label>
                   <input
                     type="date"
+                    data-field="famDob"
                     value={famDob}
-                    onChange={(e) => setFamDob(e.target.value)}
-                    className="w-full px-3 py-1.5 border rounded-lg text-xs font-bold"
-                    required
+                    onChange={(e) => {
+                      setFamDob(e.target.value);
+                      clearFamFieldError("famDob");
+                    }}
+                    className={fieldInputClass(!!famFieldErrors.famDob, "w-full px-3 py-1.5 border rounded-lg text-xs font-bold")}
                   />
+                  <FormFieldError error={famFieldErrors.famDob} />
                 </div>
 
                 <div className="space-y-1">
                   <label className="block text-xs font-bold text-slate-700">Phone Number (Optional)</label>
                   <input
                     type="text"
+                    data-field="famPhone"
                     value={famPhone}
-                    onChange={(e) => setFamPhone(e.target.value)}
+                    onChange={(e) => {
+                      setFamPhone(e.target.value);
+                      clearFamFieldError("famPhone");
+                    }}
                     placeholder="+251-9..."
-                    className="w-full px-3 py-1.5 border rounded-lg text-xs"
+                    className={fieldInputClass(!!famFieldErrors.famPhone, "w-full px-3 py-1.5 border rounded-lg text-xs")}
                   />
+                  <FormFieldError error={famFieldErrors.famPhone} />
                 </div>
               </div>
 
@@ -1864,14 +2079,28 @@ export default function MedicalManagement({
                 </button>
                 <button
                   type="submit"
-                  className="px-3.5 py-1.5 text-xs font-extrabold text-white bg-primary-custom hover:opacity-95 rounded-lg flex items-center gap-1"
+                  disabled={isSavingFam}
+                  className="px-3.5 py-1.5 text-xs font-extrabold text-white bg-primary-custom hover:opacity-95 rounded-lg flex items-center gap-1 disabled:opacity-50"
                 >
-                  <Save className="h-4 w-4 text-accent-custom" /> Save Member Record
+                  <Save className="h-4 w-4 text-accent-custom" />
+                  <span>{isSavingFam ? "Saving..." : "Save Member Record"}</span>
                 </button>
               </div>
             </form>
           </div>
         </div>
+      )}
+
+      {confirmState && (
+        <ConfirmDialog
+          isOpen={confirmState.isOpen}
+          title={confirmState.title}
+          message={confirmState.message}
+          confirmText={confirmState.confirmText}
+          variant={confirmState.variant}
+          onConfirm={confirmState.onConfirm}
+          onCancel={() => setConfirmState(null)}
+        />
       )}
     </div>
   );

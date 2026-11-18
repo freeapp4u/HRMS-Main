@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { AttendanceRecord, Employee, Department, User, ModulePermission, CompanyConfig } from "../types";
-import { getDepartmentHeadManagedDeptIds } from "../utils/rbacUtils";
+import { getDepartmentHeadManagedDeptIds, resolveOwnEmployeeRecord, UNAUTHORIZED_EMPLOYEE_RECORD_MSG } from "../utils/rbacUtils";
 import { formatReportDateTime, ReportExportPayload } from "../utils/reportBranding";
 import ReportPrintButton from "./reports/ReportPrintButton";
 import ReportPDFExportButton from "./reports/ReportPDFExportButton";
@@ -8,6 +8,9 @@ import {
   Plus, Search, Edit, Clock, Calendar, Check, X, Save, 
   FileSpreadsheet, Filter, BookOpen, Trash2 
 } from "lucide-react";
+import { useToast, ConfirmDialog } from "./ui/ToastProvider";
+import { FormFieldError, ValidationSummary, fieldInputClass } from "./ui/FormFeedback";
+import { validateAttendanceForm, focusFirstInvalidField } from "../utils/validation";
 
 interface AttendanceProps {
   attendance: AttendanceRecord[];
@@ -39,8 +42,23 @@ export default function Attendance({
   const canDelete = permissions ? permissions.actions.delete : currentUser?.role !== "Auditor";
   const canExport = permissions ? permissions.actions.export : true;
 
+  const isEmployeeRole = currentUser?.role === "Employee";
   const isDeptHead = currentUser?.role === "Department Head";
-  const managedDeptIds = isDeptHead ? getDepartmentHeadManagedDeptIds(currentUser, departments, employees) : [];
+  const effectiveScope = isEmployeeRole ? "own" : (permissions?.dataScope || (isDeptHead ? "team" : "all"));
+  const managedDeptIds = (isDeptHead || effectiveScope === "team") ? getDepartmentHeadManagedDeptIds(currentUser, departments, employees) : [];
+  const ownEmp = resolveOwnEmployeeRecord(currentUser, employees);
+  const myEmpId = ownEmp?.employeeId || currentUser?.employeeId;
+
+  const isAttendanceInScope = (employeeId: string): boolean => {
+    if (effectiveScope === "own") {
+      return Boolean(myEmpId && employeeId === myEmpId);
+    }
+    if (effectiveScope === "team" && managedDeptIds.length > 0) {
+      const emp = employees.find(e => e.employeeId === employeeId);
+      return Boolean(emp && managedDeptIds.includes(emp.departmentId));
+    }
+    return true;
+  };
 
   // Filter States
   const [searchTerm, setSearchTerm] = useState("");
@@ -61,27 +79,24 @@ export default function Attendance({
   const [status, setStatus] = useState<any>("Present");
   const [remarks, setRemarks] = useState("");
 
+  const { showSuccess, showError } = useToast();
+
   const [formError, setFormError] = useState("");
   const [formSuccess, setFormSuccess] = useState("");
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [confirmDeleteRecord, setConfirmDeleteRecord] = useState<{ rec: AttendanceRecord; empName: string } | null>(null);
 
   // Filtered lists
   const activeEmployees = employees.filter(e => {
     if (e.status !== "Active") return false;
-    if (isDeptHead && managedDeptIds.length > 0 && !managedDeptIds.includes(e.departmentId)) return false;
-    return true;
+    return isAttendanceInScope(e.employeeId);
   });
 
   const filteredAttendance = attendance.filter(rec => {
-    if (currentUser?.role === "Employee") {
-      const isMyRecord = (currentUser.employeeId && rec.employeeId === currentUser.employeeId);
-      if (!isMyRecord) return false;
-    }
+    if (!isAttendanceInScope(rec.employeeId)) return false;
 
     const emp = employees.find(e => e.employeeId === rec.employeeId);
-    if (isDeptHead && managedDeptIds.length > 0 && (!emp || !managedDeptIds.includes(emp.departmentId))) {
-      return false;
-    }
-
     const empName = emp ? emp.fullName.toLowerCase() : "";
     
     const matchSearch = 
@@ -104,6 +119,7 @@ export default function Attendance({
     setRemarks("");
     setFormError("");
     setFormSuccess("");
+    setFieldErrors({});
   };
 
   const handleOpenRecord = () => {
@@ -112,15 +128,20 @@ export default function Attendance({
   };
 
   const handleOpenEdit = (rec: AttendanceRecord) => {
+    if (!isAttendanceInScope(rec.employeeId)) {
+      showError(UNAUTHORIZED_EMPLOYEE_RECORD_MSG);
+      return;
+    }
     setSelectedRecord(rec);
     setEmpIdInput(rec.employeeId);
     setAttendanceDate(rec.date);
-    setCheckIn(rec.checkInTime);
-    setCheckOut(rec.checkOutTime);
+    setCheckIn(rec.checkInTime || "08:30");
+    setCheckOut(rec.checkOutTime || "17:00");
     setStatus(rec.status);
     setRemarks(rec.remarks);
     setFormError("");
     setFormSuccess("");
+    setFieldErrors({});
     setEditModalOpen(true);
   };
 
@@ -135,28 +156,40 @@ export default function Attendance({
 
   const handleRecordSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
     setFormError("");
     setFormSuccess("");
+    setFieldErrors({});
 
-    if (!empIdInput || !attendanceDate || !status) {
-      setFormError("Employee, Date, and Attendance Status are required.");
-      return;
-    }
-
-    // Check for duplicate attendance record for the same employee and date
-    const hasDuplicate = attendance.some(
-      r => r.employeeId === empIdInput && r.date === attendanceDate
+    const workingHrs = calculateHours(checkIn, checkOut);
+    const check = validateAttendanceForm(
+      {
+        employeeId: empIdInput,
+        date: attendanceDate,
+        checkInTime: checkIn,
+        checkOutTime: checkOut,
+        status,
+        workingHours: status === "Absent" || status === "On Leave" ? 0 : workingHrs,
+      },
+      attendance,
+      "add"
     );
-    if (hasDuplicate) {
-      setFormError(`Duplicate entry alert: Attendance is already registered for this employee on ${attendanceDate}. Use edit/correct action instead.`);
+
+    if (!check.valid) {
+      setFieldErrors(check.errors);
+      setFormError(check.summaryMessage || "Please correct the highlighted fields.");
+      focusFirstInvalidField(check.errors);
       return;
     }
 
     const empObj = employees.find(e => e.employeeId === empIdInput);
     if (!empObj) {
+      setFieldErrors({ employeeId: "Selected employee record does not exist." });
       setFormError("Selected employee is invalid.");
       return;
     }
+
+    setIsSubmitting(true);
 
     // Calculate Late Status: Standard check-in limit is 08:30
     let isLate: "Yes" | "No" = "No";
@@ -167,8 +200,6 @@ export default function Attendance({
       }
     }
     const computedStatus = isLate === "Yes" && status === "Present" ? "Late" : status;
-
-    const workingHrs = calculateHours(checkIn, checkOut);
 
     const newRec: AttendanceRecord = {
       id: `ATT_${Date.now()}`,
@@ -188,6 +219,7 @@ export default function Attendance({
     const ok = onAddAttendance(newRec);
     if (ok) {
       setFormSuccess("Attendance logged successfully!");
+      showSuccess(`Attendance logged for ${empObj.fullName} (${attendanceDate}).`);
       onLogAction(
         "Attendance",
         "Attendance Created",
@@ -195,29 +227,47 @@ export default function Attendance({
         `Logged ${newRec.status} status for employee ID ${newRec.employeeId} on ${newRec.date}`
       );
       setTimeout(() => {
+        setIsSubmitting(false);
         setRecordModalOpen(false);
         resetForm();
-      }, 1000);
+      }, 700);
     } else {
-      setFormError("Could not log attendance folder.");
+      setIsSubmitting(false);
+      setFormError("An attendance record already exists for this employee on the selected date.");
+      showError("Could not log attendance: duplicate employee/date record.");
     }
   };
 
   const handleEditSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting || !selectedRecord) return;
     setFormError("");
     setFormSuccess("");
+    setFieldErrors({});
 
-    if (!selectedRecord) return;
-
-    // Check Duplicate but skip current record
-    const hasDuplicate = attendance.some(
-      r => r.id !== selectedRecord.id && r.employeeId === empIdInput && r.date === attendanceDate
+    const workingHrs = calculateHours(checkIn, checkOut);
+    const check = validateAttendanceForm(
+      {
+        id: selectedRecord.id,
+        employeeId: empIdInput,
+        date: attendanceDate,
+        checkInTime: checkIn,
+        checkOutTime: checkOut,
+        status,
+        workingHours: status === "Absent" || status === "On Leave" ? 0 : workingHrs,
+      },
+      attendance,
+      "edit"
     );
-    if (hasDuplicate) {
-      setFormError(`Duplicate entry alert: Another attendance record already exists for employee ID ${empIdInput} on ${attendanceDate}.`);
+
+    if (!check.valid) {
+      setFieldErrors(check.errors);
+      setFormError(check.summaryMessage || "Please correct the highlighted fields.");
+      focusFirstInvalidField(check.errors);
       return;
     }
+
+    setIsSubmitting(true);
 
     let isLate: "Yes" | "No" = "No";
     if (status === "Present" && checkIn) {
@@ -227,7 +277,6 @@ export default function Attendance({
       }
     }
     const computedStatus = isLate === "Yes" && status === "Present" ? "Late" : status;
-    const workingHrs = calculateHours(checkIn, checkOut);
 
     const updatedRec: AttendanceRecord = {
       ...selectedRecord,
@@ -244,6 +293,7 @@ export default function Attendance({
 
     onUpdateAttendance(updatedRec);
     setFormSuccess("Attendance record corrected and updated!");
+    showSuccess("Attendance record updated successfully.");
     onLogAction(
       "Attendance",
       "Attendance Updated",
@@ -251,8 +301,21 @@ export default function Attendance({
       `Corrected attendance log for employee ID ${updatedRec.employeeId} on ${updatedRec.date}`
     );
     setTimeout(() => {
+      setIsSubmitting(false);
       setEditModalOpen(false);
-    }, 1000);
+    }, 700);
+  };
+
+  const executeDeleteAttendance = () => {
+    if (!confirmDeleteRecord || !onDeleteAttendance) return;
+    const { rec, empName } = confirmDeleteRecord;
+    setConfirmDeleteRecord(null);
+    const ok = onDeleteAttendance(rec.id);
+    if (ok) {
+      showSuccess(`Attendance log for ${empName} (${rec.date}) deleted.`);
+    } else {
+      showError("Unable to delete attendance log. Check your role permissions.");
+    }
   };
 
   // Printing & exporting
@@ -520,11 +583,7 @@ export default function Attendance({
                         )}
                         {canDelete && (
                           <button
-                            onClick={() => {
-                              if (window.confirm(`Are you sure you want to delete this attendance log for ${empName} on ${rec.date}?`)) {
-                                onDeleteAttendance && onDeleteAttendance(rec.id);
-                              }
-                            }}
+                            onClick={() => setConfirmDeleteRecord({ rec, empName })}
                             className="p-1 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-md transition-colors"
                             title="Delete Log"
                           >
@@ -552,11 +611,9 @@ export default function Attendance({
               </button>
             </div>
 
-            <form onSubmit={handleRecordSubmit} className="p-5 space-y-4">
-              {formError && (
-                <div className="p-3 bg-rose-50 text-rose-800 border border-rose-200 rounded-lg text-xs font-semibold">
-                  {formError}
-                </div>
+            <form onSubmit={handleRecordSubmit} noValidate className="p-5 space-y-4">
+              {(formError || Object.keys(fieldErrors).length > 0) && (
+                <ValidationSummary errors={fieldErrors} message={formError} />
               )}
               {formSuccess && (
                 <div className="p-3 bg-emerald-50 text-emerald-800 border border-emerald-200 rounded-lg text-xs font-semibold">
@@ -566,14 +623,17 @@ export default function Attendance({
 
               {/* Employee selection dropdown */}
               <div className="space-y-1">
-                <label className="block text-xs font-bold text-slate-700">Select Employee *</label>
+                <label className="block text-xs font-bold text-slate-700">Select Employee <span className="text-rose-500">*</span></label>
                 <select
+                  data-field="employeeId"
                   value={empIdInput}
-                  onChange={(e) => setEmpIdInput(e.target.value)}
-                  className="w-full px-3 py-2 border rounded-lg text-xs bg-white ring-primary-custom font-semibold text-slate-800"
-                  required
+                  onChange={(e) => {
+                    setEmpIdInput(e.target.value);
+                    if (fieldErrors.employeeId) setFieldErrors(p => ({ ...p, employeeId: "" }));
+                  }}
+                  className={fieldInputClass(Boolean(fieldErrors.employeeId), "w-full px-3 py-2 border rounded-lg text-xs bg-white ring-primary-custom font-semibold text-slate-800")}
                 >
-                  <option value="" disabled>Choose active employee</option>
+                  <option value="">Choose active employee</option>
                   {activeEmployees.map(emp => {
                     const deptObj = departments.find(d => d.id === emp.departmentId);
                     return (
@@ -583,28 +643,35 @@ export default function Attendance({
                     );
                   })}
                 </select>
+                <FormFieldError error={fieldErrors.employeeId} />
               </div>
 
               {/* Date */}
               <div className="space-y-1">
-                <label className="block text-xs font-bold text-slate-700">Attendance Date *</label>
+                <label className="block text-xs font-bold text-slate-700">Attendance Date <span className="text-rose-500">*</span></label>
                 <input
+                  data-field="date"
                   type="date"
                   value={attendanceDate}
-                  onChange={(e) => setAttendanceDate(e.target.value)}
-                  className="w-full px-3 py-2 border rounded-lg text-xs font-bold ring-primary-custom"
-                  required
+                  onChange={(e) => {
+                    setAttendanceDate(e.target.value);
+                    if (fieldErrors.date) setFieldErrors(p => ({ ...p, date: "" }));
+                  }}
+                  className={fieldInputClass(Boolean(fieldErrors.date), "w-full px-3 py-2 border rounded-lg text-xs font-bold ring-primary-custom")}
                 />
+                <FormFieldError error={fieldErrors.date} />
               </div>
 
               {/* Status */}
               <div className="space-y-1">
-                <label className="block text-xs font-bold text-slate-700">Attendance Status *</label>
+                <label className="block text-xs font-bold text-slate-700">Attendance Status <span className="text-rose-500">*</span></label>
                 <select
                   value={status}
-                  onChange={(e) => setStatus(e.target.value)}
+                  onChange={(e) => {
+                    setStatus(e.target.value);
+                    setFieldErrors(p => ({ ...p, checkInTime: "", checkOutTime: "" }));
+                  }}
                   className="w-full px-3 py-2 border rounded-lg text-xs bg-white ring-primary-custom font-bold"
-                  required
                 >
                   <option value="Present">Present (Checked In)</option>
                   <option value="Absent">Absent</option>
@@ -621,20 +688,32 @@ export default function Attendance({
                   <div className="space-y-1">
                     <label className="block text-xs font-bold text-slate-700">Check-In Time</label>
                     <input
+                      data-field="checkInTime"
                       type="time"
                       value={checkIn}
-                      onChange={(e) => setCheckIn(e.target.value)}
-                      className="w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom font-bold"
+                      onChange={(e) => {
+                        setCheckIn(e.target.value);
+                        if (fieldErrors.checkInTime || fieldErrors.checkOutTime) {
+                          setFieldErrors(p => ({ ...p, checkInTime: "", checkOutTime: "" }));
+                        }
+                      }}
+                      className={fieldInputClass(Boolean(fieldErrors.checkInTime), "w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom font-bold")}
                     />
+                    <FormFieldError error={fieldErrors.checkInTime} />
                   </div>
                   <div className="space-y-1">
                     <label className="block text-xs font-bold text-slate-700">Check-Out Time</label>
                     <input
+                      data-field="checkOutTime"
                       type="time"
                       value={checkOut}
-                      onChange={(e) => setCheckOut(e.target.value)}
-                      className="w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom font-bold"
+                      onChange={(e) => {
+                        setCheckOut(e.target.value);
+                        if (fieldErrors.checkOutTime) setFieldErrors(p => ({ ...p, checkOutTime: "" }));
+                      }}
+                      className={fieldInputClass(Boolean(fieldErrors.checkOutTime), "w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom font-bold")}
                     />
+                    <FormFieldError error={fieldErrors.checkOutTime} />
                   </div>
                 </div>
               )}
@@ -661,10 +740,11 @@ export default function Attendance({
                 </button>
                 <button
                   type="submit"
-                  className="px-3.5 py-1.5 text-xs font-extrabold text-white bg-primary-custom hover:opacity-95 rounded-lg flex items-center gap-1"
+                  disabled={isSubmitting}
+                  className="px-3.5 py-1.5 text-xs font-extrabold text-white bg-primary-custom hover:opacity-95 rounded-lg flex items-center gap-1 disabled:opacity-50"
                 >
                   <Save className="h-4 w-4 text-accent-custom" />
-                  Save Record
+                  {isSubmitting ? "Saving..." : "Save Record"}
                 </button>
               </div>
             </form>
@@ -683,11 +763,9 @@ export default function Attendance({
               </button>
             </div>
 
-            <form onSubmit={handleEditSubmit} className="p-5 space-y-4">
-              {formError && (
-                <div className="p-3 bg-rose-50 text-rose-800 border border-rose-200 rounded-lg text-xs font-semibold">
-                  {formError}
-                </div>
+            <form onSubmit={handleEditSubmit} noValidate className="p-5 space-y-4">
+              {(formError || Object.keys(fieldErrors).length > 0) && (
+                <ValidationSummary errors={fieldErrors} message={formError} />
               )}
               {formSuccess && (
                 <div className="p-3 bg-emerald-50 text-emerald-800 border border-emerald-200 rounded-lg text-xs font-semibold">
@@ -702,7 +780,6 @@ export default function Attendance({
                   onChange={(e) => setEmpIdInput(e.target.value)}
                   className="w-full px-3 py-2 border rounded-lg text-xs bg-slate-100 font-semibold text-slate-800 cursor-not-allowed"
                   disabled
-                  required
                 >
                   {employees.map(emp => (
                     <option key={emp.employeeId} value={emp.employeeId}>
@@ -720,7 +797,6 @@ export default function Attendance({
                   onChange={(e) => setAttendanceDate(e.target.value)}
                   className="w-full px-3 py-2 border rounded-lg text-xs font-bold ring-primary-custom bg-slate-100 cursor-not-allowed"
                   disabled
-                  required
                 />
               </div>
 
@@ -728,9 +804,11 @@ export default function Attendance({
                 <label className="block text-xs font-bold text-slate-700">Status *</label>
                 <select
                   value={status}
-                  onChange={(e) => setStatus(e.target.value)}
+                  onChange={(e) => {
+                    setStatus(e.target.value);
+                    setFieldErrors(p => ({ ...p, checkInTime: "", checkOutTime: "" }));
+                  }}
                   className="w-full px-3 py-2 border rounded-lg text-xs bg-white ring-primary-custom font-bold"
-                  required
                 >
                   <option value="Present">Present</option>
                   <option value="Absent">Absent</option>
@@ -746,20 +824,32 @@ export default function Attendance({
                   <div className="space-y-1">
                     <label className="block text-xs font-bold text-slate-700">Check-In Time</label>
                     <input
+                      data-field="checkInTime"
                       type="time"
                       value={checkIn}
-                      onChange={(e) => setCheckIn(e.target.value)}
-                      className="w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom font-bold"
+                      onChange={(e) => {
+                        setCheckIn(e.target.value);
+                        if (fieldErrors.checkInTime || fieldErrors.checkOutTime) {
+                          setFieldErrors(p => ({ ...p, checkInTime: "", checkOutTime: "" }));
+                        }
+                      }}
+                      className={fieldInputClass(Boolean(fieldErrors.checkInTime), "w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom font-bold")}
                     />
+                    <FormFieldError error={fieldErrors.checkInTime} />
                   </div>
                   <div className="space-y-1">
                     <label className="block text-xs font-bold text-slate-700">Check-Out Time</label>
                     <input
+                      data-field="checkOutTime"
                       type="time"
                       value={checkOut}
-                      onChange={(e) => setCheckOut(e.target.value)}
-                      className="w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom font-bold"
+                      onChange={(e) => {
+                        setCheckOut(e.target.value);
+                        if (fieldErrors.checkOutTime) setFieldErrors(p => ({ ...p, checkOutTime: "" }));
+                      }}
+                      className={fieldInputClass(Boolean(fieldErrors.checkOutTime), "w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom font-bold")}
                     />
+                    <FormFieldError error={fieldErrors.checkOutTime} />
                   </div>
                 </div>
               )}
@@ -784,16 +874,33 @@ export default function Attendance({
                 </button>
                 <button
                   type="submit"
-                  className="px-3.5 py-1.5 text-xs font-extrabold text-white bg-primary-custom hover:opacity-95 rounded-lg flex items-center gap-1"
+                  disabled={isSubmitting}
+                  className="px-3.5 py-1.5 text-xs font-extrabold text-white bg-primary-custom hover:opacity-95 rounded-lg flex items-center gap-1 disabled:opacity-50"
                 >
                   <Save className="h-4 w-4 text-accent-custom" />
-                  Save Changes
+                  {isSubmitting ? "Saving..." : "Save Changes"}
                 </button>
               </div>
             </form>
           </div>
         </div>
       )}
+
+      <ConfirmDialog
+        isOpen={Boolean(confirmDeleteRecord)}
+        title="Delete Attendance Record"
+        message={
+          confirmDeleteRecord ? (
+            <>
+              Are you sure you want to delete this attendance log for <strong>{confirmDeleteRecord.empName}</strong> on <strong>{confirmDeleteRecord.rec.date}</strong>?
+            </>
+          ) : null
+        }
+        confirmText="Delete Record"
+        variant="danger"
+        onConfirm={executeDeleteAttendance}
+        onCancel={() => setConfirmDeleteRecord(null)}
+      />
     </div>
   );
 }

@@ -3,7 +3,7 @@ import {
   PublicHoliday, CompanyConfig, ActivityLog, FamilyMember, MedicalExpense,
   SalaryComponent, TaxConfiguration, PayrollPeriod, EmployeeSalaryStructure,
   PayrollRecord, Payslip, PayslipDistributionLog, PayrollApproval, PayrollImportLog, PayrollSettings,
-  EmailActivityLog, SystemRole, RolePermissions
+  EmailActivityLog, SystemRole, RolePermissions, HRRequest, EmployeeNotification, DriveAssociation
 } from "./types";
 import { 
   DEFAULT_USERS, DEFAULT_DEPARTMENTS, DEFAULT_EMPLOYEES, 
@@ -16,7 +16,7 @@ import {
 } from "./initialData";
 import { DEFAULT_TAX_CONFIG } from "./utils/payrollUtils";
 
-const STORAGE_KEYS = {
+export const STORAGE_KEYS = {
   USERS: "ethiore_users",
   DEPARTMENTS: "ethiore_departments",
   EMPLOYEES: "ethiore_employees",
@@ -41,7 +41,10 @@ const STORAGE_KEYS = {
   PAYROLL_IMPORT_LOGS: "ethiore_payroll_import_logs",
   PAYROLL_SETTINGS: "ethiore_payroll_settings",
   ROLES: "ethiore_roles",
-  ROLE_PERMISSIONS: "ethiore_role_permissions"
+  ROLE_PERMISSIONS: "ethiore_role_permissions",
+  HR_REQUESTS: "ethiore_hr_requests",
+  NOTIFICATIONS: "ethiore_notifications",
+  DRIVE_ASSOCIATIONS: "ethiore_drive_associations"
 };
 
 export interface AppState {
@@ -70,6 +73,10 @@ export interface AppState {
   payrollSettings: PayrollSettings;
   roles: SystemRole[];
   rolePermissions: RolePermissions[];
+  // ESS & Shared Workspace State
+  hrRequests: HRRequest[];
+  notifications: EmployeeNotification[];
+  driveAssociations: DriveAssociation[];
 }
 
 export function loadState(): AppState {
@@ -150,7 +157,10 @@ export function loadState(): AppState {
     payrollImportLogs: getOrSeed<PayrollImportLog[]>(STORAGE_KEYS.PAYROLL_IMPORT_LOGS, DEFAULT_PAYROLL_IMPORT_LOGS),
     payrollSettings: getOrSeed<PayrollSettings>(STORAGE_KEYS.PAYROLL_SETTINGS, DEFAULT_PAYROLL_SETTINGS),
     roles: getOrSeed<SystemRole[]>(STORAGE_KEYS.ROLES, []),
-    rolePermissions: getOrSeed<RolePermissions[]>(STORAGE_KEYS.ROLE_PERMISSIONS, [])
+    rolePermissions: getOrSeed<RolePermissions[]>(STORAGE_KEYS.ROLE_PERMISSIONS, []),
+    hrRequests: getOrSeed<HRRequest[]>(STORAGE_KEYS.HR_REQUESTS, []),
+    notifications: getOrSeed<EmployeeNotification[]>(STORAGE_KEYS.NOTIFICATIONS, []),
+    driveAssociations: getOrSeed<DriveAssociation[]>(STORAGE_KEYS.DRIVE_ASSOCIATIONS, [])
   };
 }
 
@@ -181,6 +191,88 @@ export function saveState(state: Partial<AppState>) {
   if (state.payrollSettings !== undefined) localStorage.setItem(STORAGE_KEYS.PAYROLL_SETTINGS, JSON.stringify(state.payrollSettings));
   if (state.roles !== undefined) localStorage.setItem(STORAGE_KEYS.ROLES, JSON.stringify(state.roles));
   if (state.rolePermissions !== undefined) localStorage.setItem(STORAGE_KEYS.ROLE_PERMISSIONS, JSON.stringify(state.rolePermissions));
+  if (state.hrRequests !== undefined) localStorage.setItem(STORAGE_KEYS.HR_REQUESTS, JSON.stringify(state.hrRequests));
+  if (state.notifications !== undefined) localStorage.setItem(STORAGE_KEYS.NOTIFICATIONS, JSON.stringify(state.notifications));
+  if (state.driveAssociations !== undefined) localStorage.setItem(STORAGE_KEYS.DRIVE_ASSOCIATIONS, JSON.stringify(state.driveAssociations));
+}
+
+/**
+ * Clears sensitive operational localStorage data on logout to prevent cross-user leakage
+ * in shared browser sessions.
+ */
+export function clearSensitiveWorkspaceStorage(): void {
+  const keysToClear = [
+    STORAGE_KEYS.USERS,
+    STORAGE_KEYS.EMPLOYEES,
+    STORAGE_KEYS.ATTENDANCE,
+    STORAGE_KEYS.LEAVES,
+    STORAGE_KEYS.FAMILY_MEMBERS,
+    STORAGE_KEYS.MEDICAL_EXPENSES,
+    STORAGE_KEYS.LOGS,
+    STORAGE_KEYS.CURRENT_USER,
+    STORAGE_KEYS.EMAIL_LOGS,
+    STORAGE_KEYS.SALARY_STRUCTURES,
+    STORAGE_KEYS.PAYROLL_RECORDS,
+    STORAGE_KEYS.PAYSLIPS,
+    STORAGE_KEYS.PAYSLIP_DISTRIBUTION_LOGS,
+    STORAGE_KEYS.PAYROLL_APPROVALS,
+    STORAGE_KEYS.PAYROLL_IMPORT_LOGS,
+    STORAGE_KEYS.HR_REQUESTS,
+    STORAGE_KEYS.NOTIFICATIONS,
+    STORAGE_KEYS.DRIVE_ASSOCIATIONS,
+  ];
+  keysToClear.forEach((k) => {
+    try {
+      localStorage.removeItem(k);
+    } catch {
+      // Ignore storage access errors
+    }
+  });
+}
+
+/**
+ * Strictly scopes client-side workspace state to the authenticated employee's own records.
+ */
+export function scopeAppStateForEmployee(
+  state: AppState,
+  employeeId?: string,
+  user?: User | null
+): AppState {
+  const empId = employeeId || user?.employeeId;
+  const normEmail = (user?.email || "").trim().toLowerCase();
+  const isOwnEmp = (id?: string, email?: string) =>
+    Boolean(
+      (empId && id === empId) ||
+        (normEmail && email && email.trim().toLowerCase() === normEmail)
+    );
+
+  return {
+    ...state,
+    users: user ? [user] : [],
+    employees: (state.employees || []).filter((e) => !e.isDeleted && isOwnEmp(e.employeeId, e.email)),
+    attendance: empId ? (state.attendance || []).filter((a) => !a.isDeleted && a.employeeId === empId) : [],
+    leaves: empId ? (state.leaves || []).filter((l) => !l.isDeleted && l.employeeId === empId) : [],
+    familyMembers: empId ? (state.familyMembers || []).filter((f) => f.employeeId === empId) : [],
+    medicalExpenses: empId ? (state.medicalExpenses || []).filter((m) => m.employeeId === empId) : [],
+    salaryStructures: empId ? (state.salaryStructures || []).filter((s) => s.employeeId === empId) : [],
+    payrollRecords: empId ? (state.payrollRecords || []).filter((p) => !p.isDeleted && p.employeeId === empId) : [],
+    payslips: empId ? (state.payslips || []).filter((p) => p.employeeId === empId) : [],
+    payslipDistributionLogs: [],
+    payrollApprovals: [],
+    payrollImportLogs: [],
+    logs: [],
+    emailLogs: [],
+    hrRequests: empId ? (state.hrRequests || []).filter((r) => r.employeeId === empId) : [],
+    notifications: (state.notifications || []).filter(
+      (n) =>
+        n.category === "announcement" ||
+        (empId && n.recipientEmployeeId === empId) ||
+        (normEmail && n.recipientEmail?.trim().toLowerCase() === normEmail)
+    ),
+    driveAssociations: empId
+      ? (state.driveAssociations || []).filter((d) => d.targetType === "Employee" && d.targetId === empId)
+      : [],
+  };
 }
 
 // Global logger helper

@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
-import { Employee, Department, User, FamilyMember, ModulePermission, CompanyConfig } from "../types";
-import { getDepartmentHeadManagedDeptIds } from "../utils/rbacUtils";
+import { Employee, Department, User, FamilyMember, ModulePermission, CompanyConfig, RolePermissions, DriveAssociation } from "../types";
+import { getDepartmentHeadManagedDeptIds, resolveOwnEmployeeRecord, UNAUTHORIZED_EMPLOYEE_RECORD_MSG } from "../utils/rbacUtils";
 import { formatReportDateTime, ReportExportPayload } from "../utils/reportBranding";
 import ReportPrintButton from "./reports/ReportPrintButton";
 import ReportPDFExportButton from "./reports/ReportPDFExportButton";
@@ -9,6 +9,9 @@ import {
   X, Save, FileSpreadsheet, Download, EyeOff, FileText, ExternalLink, Heart,
   Upload, CheckCircle2, AlertCircle, FileUp, RefreshCw, Trash2
 } from "lucide-react";
+import { useToast, ConfirmDialog } from "./ui/ToastProvider";
+import { FormFieldError, ValidationSummary, fieldInputClass } from "./ui/FormFeedback";
+import { validateEmployeeForm, focusFirstInvalidField } from "../utils/validation";
 
 interface ParsedImportRow {
   rowIndex: number;
@@ -52,6 +55,8 @@ interface EmployeesProps {
   currentUser: User | null;
   initialSubTab?: string;
   permissions?: ModulePermission;
+  rolePermissions?: RolePermissions;
+  driveAssociations?: DriveAssociation[];
   onAddEmployee: (emp: Employee) => boolean;
   onAddEmployeesBulk?: (emps: Employee[]) => Promise<{ successCount: number; failCount: number; failedErrors: string[] }>;
   onUpdateEmployee: (emp: Employee) => void;
@@ -68,6 +73,7 @@ export default function Employees({
   currentUser,
   initialSubTab,
   permissions,
+  driveAssociations,
   onAddEmployee,
   onAddEmployeesBulk,
   onUpdateEmployee,
@@ -82,8 +88,22 @@ export default function Employees({
   const canUseEnrollmentSub = permissions ? permissions.submenus.enrollment !== false : canCreate;
   const canUseBulkImportSub = permissions ? permissions.submenus.bulk_import !== false : canCreate;
 
+  const isEmployeeRole = currentUser?.role === "Employee";
   const isDeptHead = currentUser?.role === "Department Head";
-  const managedDeptIds = isDeptHead ? getDepartmentHeadManagedDeptIds(currentUser, departments, employees) : [];
+  const effectiveScope = isEmployeeRole ? "own" : (permissions?.dataScope || (isDeptHead ? "team" : "all"));
+  const managedDeptIds = (isDeptHead || effectiveScope === "team") ? getDepartmentHeadManagedDeptIds(currentUser, departments, employees) : [];
+  const ownEmp = resolveOwnEmployeeRecord(currentUser, employees);
+  const myEmpId = ownEmp?.employeeId || currentUser?.employeeId;
+
+  const isEmpInScope = (emp: Employee): boolean => {
+    if (effectiveScope === "own") {
+      return Boolean(myEmpId && emp.employeeId === myEmpId);
+    }
+    if (effectiveScope === "team" && managedDeptIds.length > 0) {
+      return managedDeptIds.includes(emp.departmentId);
+    }
+    return true;
+  };
 
   // Search & Filter States
   const [searchTerm, setSearchTerm] = useState("");
@@ -112,7 +132,13 @@ export default function Employees({
   const [driveAssocs, setDriveAssocs] = useState<any[]>([]);
   React.useEffect(() => {
     if (detailModalOpen && selectedEmployee) {
-      const saved = localStorage.getItem("drive_associations");
+      if (driveAssociations) {
+        setDriveAssocs(
+          driveAssociations.filter(a => a.targetType === "Employee" && a.targetId === selectedEmployee.employeeId)
+        );
+        return;
+      }
+      const saved = localStorage.getItem("ethiore_drive_associations") || localStorage.getItem("drive_associations");
       if (saved) {
         try {
           const parsed = JSON.parse(saved);
@@ -125,7 +151,7 @@ export default function Employees({
     } else {
       setDriveAssocs([]);
     }
-  }, [detailModalOpen, selectedEmployee]);
+  }, [detailModalOpen, selectedEmployee, driveAssociations]);
 
   // Form States
   const [employeeId, setEmployeeId] = useState("");
@@ -145,15 +171,19 @@ export default function Employees({
   const [empStatus, setEmpStatus] = useState<"Active" | "Inactive">("Active");
   const [category, setCategory] = useState("");
 
+  const { showSuccess, showError, showWarning } = useToast();
   const [formError, setFormError] = useState("");
   const [formSuccess, setFormSuccess] = useState("");
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [confirmDeleteEmp, setConfirmDeleteEmp] = useState<Employee | null>(null);
 
   // Get only active departments for enrollment dropdown
   const activeDepartments = departments.filter(d => d.status === "Active");
 
   // Filtered List
   const filteredEmployees = employees.filter(emp => {
-    if (isDeptHead && managedDeptIds.length > 0 && !managedDeptIds.includes(emp.departmentId)) {
+    if (!isEmpInScope(emp)) {
       return false;
     }
     const matchSearch = 
@@ -187,6 +217,7 @@ export default function Employees({
     setCategory("");
     setFormError("");
     setFormSuccess("");
+    setFieldErrors({});
   };
 
   const handleOpenAdd = () => {
@@ -209,6 +240,10 @@ export default function Employees({
   }, [initialSubTab]);
 
   const handleOpenEdit = (emp: Employee) => {
+    if (!isEmpInScope(emp)) {
+      showError(UNAUTHORIZED_EMPLOYEE_RECORD_MSG);
+      return;
+    }
     setSelectedEmployee(emp);
     setEmployeeId(emp.employeeId);
     setFirstName(emp.firstName);
@@ -228,30 +263,57 @@ export default function Employees({
     setCategory(emp.category || "");
     setFormError("");
     setFormSuccess("");
+    setFieldErrors({});
     setEditModalOpen(true);
   };
 
   const handleOpenView = (emp: Employee) => {
+    if (!isEmpInScope(emp)) {
+      showError(UNAUTHORIZED_EMPLOYEE_RECORD_MSG);
+      return;
+    }
     setSelectedEmployee(emp);
     setDetailModalOpen(true);
   };
 
   const handleAddSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
     setFormError("");
     setFormSuccess("");
+    setFieldErrors({});
 
-    if (!employeeId.trim() || !firstName.trim() || !lastName.trim() || !departmentId) {
-      setFormError("Employee ID, First/Last Name, and Department are required.");
+    const check = validateEmployeeForm(
+      {
+        employeeId,
+        firstName,
+        middleName,
+        lastName,
+        gender,
+        dob,
+        email,
+        phoneNumber,
+        altPhoneNumber,
+        address,
+        departmentId,
+        position,
+        employmentType,
+        hireDate,
+        status: empStatus,
+      },
+      employees,
+      departments,
+      "add"
+    );
+
+    if (!check.valid) {
+      setFieldErrors(check.errors);
+      setFormError(check.summaryMessage || "Please correct the highlighted fields.");
+      focusFirstInvalidField(check.errors);
       return;
     }
 
-    // Verify uniqueness of ID
-    const isIdDuplicate = employees.some(emp => emp.employeeId.toUpperCase() === employeeId.trim().toUpperCase());
-    if (isIdDuplicate) {
-      setFormError(`Employee ID '${employeeId}' is already registered. Please provide a unique ID.`);
-      return;
-    }
+    setIsSubmitting(true);
 
     const newEmp: Employee = {
       employeeId: employeeId.trim().toUpperCase(),
@@ -261,7 +323,7 @@ export default function Employees({
       fullName: `${firstName.trim()} ${middleName.trim() ? middleName.trim() + " " : ""}${lastName.trim()}`,
       gender,
       dob,
-      email: email.trim(),
+      email: email.trim().toLowerCase(),
       phoneNumber: phoneNumber.trim(),
       altPhoneNumber: altPhoneNumber.trim(),
       address: address.trim(),
@@ -280,6 +342,7 @@ export default function Employees({
     const success = onAddEmployee(newEmp);
     if (success) {
       setFormSuccess("Employee registered successfully!");
+      showSuccess(`Employee ${newEmp.fullName} (${newEmp.employeeId}) enrolled.`);
       onLogAction(
         "Employee",
         "Employee Created",
@@ -287,25 +350,55 @@ export default function Employees({
         `Enrolled employee ${newEmp.fullName} in ${newEmp.departmentId}`
       );
       setTimeout(() => {
+        setIsSubmitting(false);
         setAddModalOpen(false);
         resetForm();
-      }, 1000);
+      }, 700);
     } else {
-      setFormError("Could not enroll employee. Make sure the database constraints are satisfied.");
+      setIsSubmitting(false);
+      setFormError("This employee already exists or could not be saved. Verify Employee ID uniqueness.");
+      showError("Could not enroll employee. Duplicate ID or database constraint failed.");
     }
   };
 
   const handleEditSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting || !selectedEmployee) return;
     setFormError("");
     setFormSuccess("");
+    setFieldErrors({});
 
-    if (!firstName.trim() || !lastName.trim() || !departmentId) {
-      setFormError("First Name, Last Name, and Department are required.");
+    const check = validateEmployeeForm(
+      {
+        employeeId: selectedEmployee.employeeId,
+        firstName,
+        middleName,
+        lastName,
+        gender,
+        dob,
+        email,
+        phoneNumber,
+        altPhoneNumber,
+        address,
+        departmentId,
+        position,
+        employmentType,
+        hireDate,
+        status: empStatus,
+      },
+      employees,
+      departments,
+      "edit"
+    );
+
+    if (!check.valid) {
+      setFieldErrors(check.errors);
+      setFormError(check.summaryMessage || "Please correct the highlighted fields.");
+      focusFirstInvalidField(check.errors);
       return;
     }
 
-    if (!selectedEmployee) return;
+    setIsSubmitting(true);
 
     const updatedEmp: Employee = {
       ...selectedEmployee,
@@ -315,7 +408,7 @@ export default function Employees({
       fullName: `${firstName.trim()} ${middleName.trim() ? middleName.trim() + " " : ""}${lastName.trim()}`,
       gender,
       dob,
-      email: email.trim(),
+      email: email.trim().toLowerCase(),
       phoneNumber: phoneNumber.trim(),
       altPhoneNumber: altPhoneNumber.trim(),
       address: address.trim(),
@@ -331,6 +424,7 @@ export default function Employees({
 
     onUpdateEmployee(updatedEmp);
     setFormSuccess("Employee folder updated successfully!");
+    showSuccess(`Updated employee profile for ${updatedEmp.fullName}.`);
     onLogAction(
       "Employee",
       "Employee Updated",
@@ -338,8 +432,9 @@ export default function Employees({
       `Updated employee parameters for ${updatedEmp.fullName}`
     );
     setTimeout(() => {
+      setIsSubmitting(false);
       setEditModalOpen(false);
-    }, 1000);
+    }, 700);
   };
 
   const handleToggleStatus = (emp: Employee) => {
@@ -351,6 +446,7 @@ export default function Employees({
       updatedBy: currentUser?.email || "system@ethiopianre.com"
     };
     onUpdateEmployee(updated);
+    showSuccess(`${emp.fullName} marked as ${nextStatus}.`);
     onLogAction(
       "Employee",
       nextStatus === "Active" ? "Employee Activated" : "Employee Deactivated",
@@ -361,21 +457,21 @@ export default function Employees({
 
   const handleDeleteClick = (emp: Employee) => {
     if (!canDelete) {
-      alert("Role Restriction: You do not have permission to delete employee records.");
+      showError("Role Restriction: You do not have permission to delete employee records.");
       return;
     }
+    setConfirmDeleteEmp(emp);
+  };
 
-    const confirmMsg = `Are you sure you want to delete employee: ${emp.fullName} (${emp.employeeId})?\n\nThis will mark the record as deleted and archive it for audit purposes. This action is auditable.`;
-    
-    if (window.confirm(confirmMsg)) {
-      if (onDeleteEmployee) {
-        const ok = onDeleteEmployee(emp.employeeId);
-        if (ok) {
-          alert("Employee record has been successfully archived/deleted.");
-        } else {
-          alert("Error: Could not delete record. Please check permissions or system logs.");
-        }
-      }
+  const executeDeleteEmployee = () => {
+    if (!confirmDeleteEmp || !onDeleteEmployee) return;
+    const emp = confirmDeleteEmp;
+    setConfirmDeleteEmp(null);
+    const ok = onDeleteEmployee(emp.employeeId);
+    if (ok) {
+      showSuccess(`Employee ${emp.fullName} (${emp.employeeId}) archived successfully.`);
+    } else {
+      showError("Could not delete employee record. Verify your permissions.");
     }
   };
 
@@ -423,7 +519,7 @@ export default function Employees({
 
       const lines = parseCSVText(text);
       if (lines.length < 2) {
-        alert("Uploaded CSV file is empty or missing valid headers.");
+        showError("Uploaded CSV file is empty or missing valid header/data rows.", "Invalid CSV File");
         setIsProcessingImport(false);
         return;
       }
@@ -588,7 +684,7 @@ export default function Employees({
   const handleDownloadRejectedCSV = () => {
     const rejectedRows = importRows.filter(r => !r.isValid);
     if (rejectedRows.length === 0) {
-      alert("No rejected records found.");
+      showWarning("No rejected records found in the current preview.");
       return;
     }
 
@@ -611,7 +707,7 @@ export default function Employees({
   const handleExecuteImport = async () => {
     const validRows = importRows.filter(r => r.isValid && r.employeeObj);
     if (validRows.length === 0) {
-      alert("No valid employee records to import.");
+      showError("No valid employee records are ready to import. Fix the highlighted CSV errors first.");
       return;
     }
 
@@ -1089,11 +1185,9 @@ export default function Employees({
               </button>
             </div>
             
-            <form onSubmit={handleAddSubmit} className="p-6 space-y-6">
-              {formError && (
-                <div className="p-3 bg-rose-50 text-rose-800 border border-rose-200 rounded-lg text-xs font-semibold">
-                  {formError}
-                </div>
+            <form onSubmit={handleAddSubmit} noValidate className="p-6 space-y-6">
+              {(formError || Object.keys(fieldErrors).length > 0) && (
+                <ValidationSummary errors={fieldErrors} message={formError} />
               )}
               {formSuccess && (
                 <div className="p-3 bg-emerald-50 text-emerald-800 border border-emerald-200 rounded-lg text-xs font-semibold">
@@ -1106,49 +1200,65 @@ export default function Employees({
                 <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider border-b pb-1">1. Basic Identification</p>
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                   <div className="space-y-1">
-                    <label className="block text-xs font-bold text-slate-700">Employee ID *</label>
+                    <label className="block text-xs font-bold text-slate-700">Employee ID <span className="text-rose-500">*</span></label>
                     <input
+                      data-field="employeeId"
                       type="text"
                       value={employeeId}
-                      onChange={(e) => setEmployeeId(e.target.value)}
-                      className="w-full px-3 py-2 border rounded-lg text-xs font-bold ring-primary-custom"
-                      required
+                      onChange={(e) => {
+                        setEmployeeId(e.target.value);
+                        if (fieldErrors.employeeId) setFieldErrors(p => ({ ...p, employeeId: "" }));
+                      }}
+                      className={fieldInputClass(Boolean(fieldErrors.employeeId), "w-full px-3 py-2 border rounded-lg text-xs font-bold ring-primary-custom")}
                     />
+                    <FormFieldError error={fieldErrors.employeeId} />
                   </div>
                   <div className="space-y-1">
-                    <label className="block text-xs font-bold text-slate-700">Gender *</label>
+                    <label className="block text-xs font-bold text-slate-700">Gender <span className="text-rose-500">*</span></label>
                     <select
+                      data-field="gender"
                       value={gender}
-                      onChange={(e) => setGender(e.target.value as "Male" | "Female")}
-                      className="w-full px-3 py-2 border rounded-lg text-xs bg-white ring-primary-custom"
-                      required
+                      onChange={(e) => {
+                        setGender(e.target.value as "Male" | "Female");
+                        if (fieldErrors.gender) setFieldErrors(p => ({ ...p, gender: "" }));
+                      }}
+                      className={fieldInputClass(Boolean(fieldErrors.gender), "w-full px-3 py-2 border rounded-lg text-xs bg-white ring-primary-custom")}
                     >
                       <option value="Male">Male</option>
                       <option value="Female">Female</option>
                     </select>
+                    <FormFieldError error={fieldErrors.gender} />
                   </div>
                   <div className="space-y-1">
-                    <label className="block text-xs font-bold text-slate-700">Date of Birth *</label>
+                    <label className="block text-xs font-bold text-slate-700">Date of Birth <span className="text-rose-500">*</span></label>
                     <input
+                      data-field="dob"
                       type="date"
                       value={dob}
-                      onChange={(e) => setDob(e.target.value)}
-                      className="w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom"
-                      required
+                      onChange={(e) => {
+                        setDob(e.target.value);
+                        if (fieldErrors.dob) setFieldErrors(p => ({ ...p, dob: "" }));
+                      }}
+                      className={fieldInputClass(Boolean(fieldErrors.dob), "w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom")}
                     />
+                    <FormFieldError error={fieldErrors.dob} />
                   </div>
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                   <div className="space-y-1">
-                    <label className="block text-xs font-bold text-slate-700">First Name *</label>
+                    <label className="block text-xs font-bold text-slate-700">First Name <span className="text-rose-500">*</span></label>
                     <input
+                      data-field="firstName"
                       type="text"
                       value={firstName}
-                      onChange={(e) => setFirstName(e.target.value)}
-                      className="w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom"
-                      required
+                      onChange={(e) => {
+                        setFirstName(e.target.value);
+                        if (fieldErrors.firstName) setFieldErrors(p => ({ ...p, firstName: "" }));
+                      }}
+                      className={fieldInputClass(Boolean(fieldErrors.firstName), "w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom")}
                     />
+                    <FormFieldError error={fieldErrors.firstName} />
                   </div>
                   <div className="space-y-1">
                     <label className="block text-xs font-bold text-slate-700">Middle Name</label>
@@ -1160,14 +1270,18 @@ export default function Employees({
                     />
                   </div>
                   <div className="space-y-1">
-                    <label className="block text-xs font-bold text-slate-700">Last Name *</label>
+                    <label className="block text-xs font-bold text-slate-700">Last Name <span className="text-rose-500">*</span></label>
                     <input
+                      data-field="lastName"
                       type="text"
                       value={lastName}
-                      onChange={(e) => setLastName(e.target.value)}
-                      className="w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom"
-                      required
+                      onChange={(e) => {
+                        setLastName(e.target.value);
+                        if (fieldErrors.lastName) setFieldErrors(p => ({ ...p, lastName: "" }));
+                      }}
+                      className={fieldInputClass(Boolean(fieldErrors.lastName), "w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom")}
                     />
+                    <FormFieldError error={fieldErrors.lastName} />
                   </div>
                 </div>
               </div>
@@ -1177,45 +1291,60 @@ export default function Employees({
                 <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider border-b pb-1">2. Contact Details</p>
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                   <div className="space-y-1">
-                    <label className="block text-xs font-bold text-slate-700">Work Email</label>
+                    <label className="block text-xs font-bold text-slate-700">Work Email <span className="text-rose-500">*</span></label>
                     <input
+                      data-field="email"
                       type="email"
+                      placeholder="name@ethiopianre.com"
                       value={email}
-                      onChange={(e) => setEmail(e.target.value)}
-                      className="w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom"
+                      onChange={(e) => {
+                        setEmail(e.target.value);
+                        if (fieldErrors.email) setFieldErrors(p => ({ ...p, email: "" }));
+                      }}
+                      className={fieldInputClass(Boolean(fieldErrors.email), "w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom")}
                     />
+                    <FormFieldError error={fieldErrors.email} />
                   </div>
                   <div className="space-y-1">
-                    <label className="block text-xs font-bold text-slate-700">Phone Number *</label>
+                    <label className="block text-xs font-bold text-slate-700">Phone Number <span className="text-rose-500">*</span></label>
                     <input
+                      data-field="phoneNumber"
                       type="text"
                       placeholder="+251-9..."
                       value={phoneNumber}
-                      onChange={(e) => setPhoneNumber(e.target.value)}
-                      className="w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom"
-                      required
+                      onChange={(e) => {
+                        setPhoneNumber(e.target.value);
+                        if (fieldErrors.phoneNumber) setFieldErrors(p => ({ ...p, phoneNumber: "" }));
+                      }}
+                      className={fieldInputClass(Boolean(fieldErrors.phoneNumber), "w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom")}
                     />
+                    <FormFieldError error={fieldErrors.phoneNumber} />
                   </div>
                   <div className="space-y-1">
                     <label className="block text-xs font-bold text-slate-700">Alternative Phone</label>
                     <input
+                      data-field="altPhoneNumber"
                       type="text"
                       value={altPhoneNumber}
-                      onChange={(e) => setAltPhoneNumber(e.target.value)}
-                      className="w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom"
+                      onChange={(e) => {
+                        setAltPhoneNumber(e.target.value);
+                        if (fieldErrors.altPhoneNumber) setFieldErrors(p => ({ ...p, altPhoneNumber: "" }));
+                      }}
+                      className={fieldInputClass(Boolean(fieldErrors.altPhoneNumber), "w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom")}
                     />
+                    <FormFieldError error={fieldErrors.altPhoneNumber} />
                   </div>
                 </div>
 
                 <div className="space-y-1">
-                  <label className="block text-xs font-bold text-slate-700">Residential Address *</label>
+                  <label className="block text-xs font-bold text-slate-700">Residential Address</label>
                   <input
+                    data-field="address"
                     type="text"
                     placeholder="Woreda, House No, Area Name..."
                     value={address}
                     onChange={(e) => setAddress(e.target.value)}
                     className="w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom"
-                    required
                   />
                 </div>
               </div>
@@ -1225,41 +1354,49 @@ export default function Employees({
                 <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider border-b pb-1">3. Employment &amp; Structural Placement</p>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div className="space-y-1">
-                    <label className="block text-xs font-bold text-slate-700">Department Placement *</label>
+                    <label className="block text-xs font-bold text-slate-700">Department Placement <span className="text-rose-500">*</span></label>
                     <select
+                      data-field="departmentId"
                       value={departmentId}
-                      onChange={(e) => setDepartmentId(e.target.value)}
-                      className="w-full px-3 py-2 border rounded-lg text-xs bg-white ring-primary-custom font-bold"
-                      required
+                      onChange={(e) => {
+                        setDepartmentId(e.target.value);
+                        if (fieldErrors.departmentId) setFieldErrors(p => ({ ...p, departmentId: "" }));
+                      }}
+                      className={fieldInputClass(Boolean(fieldErrors.departmentId), "w-full px-3 py-2 border rounded-lg text-xs bg-white ring-primary-custom font-bold")}
                     >
+                      <option value="">-- Select Department --</option>
                       {activeDepartments.map(dept => (
                         <option key={dept.id} value={dept.id}>
                           {dept.name} ({dept.code})
                         </option>
                       ))}
                     </select>
+                    <FormFieldError error={fieldErrors.departmentId} />
                   </div>
                   <div className="space-y-1">
-                    <label className="block text-xs font-bold text-slate-700">Job Title / Position *</label>
+                    <label className="block text-xs font-bold text-slate-700">Job Title / Position <span className="text-rose-500">*</span></label>
                     <input
+                      data-field="position"
                       type="text"
                       placeholder="e.g. Senior Underwriter"
                       value={position}
-                      onChange={(e) => setPosition(e.target.value)}
-                      className="w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom"
-                      required
+                      onChange={(e) => {
+                        setPosition(e.target.value);
+                        if (fieldErrors.position) setFieldErrors(p => ({ ...p, position: "" }));
+                      }}
+                      className={fieldInputClass(Boolean(fieldErrors.position), "w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom")}
                     />
+                    <FormFieldError error={fieldErrors.position} />
                   </div>
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                   <div className="space-y-1">
-                    <label className="block text-xs font-bold text-slate-700">Employment Type *</label>
+                    <label className="block text-xs font-bold text-slate-700">Employment Type <span className="text-rose-500">*</span></label>
                     <select
                       value={employmentType}
                       onChange={(e) => setEmploymentType(e.target.value as any)}
                       className="w-full px-3 py-2 border rounded-lg text-xs bg-white ring-primary-custom font-semibold"
-                      required
                     >
                       <option value="Permanent">Permanent</option>
                       <option value="Contract">Contract</option>
@@ -1268,14 +1405,18 @@ export default function Employees({
                     </select>
                   </div>
                   <div className="space-y-1">
-                    <label className="block text-xs font-bold text-slate-700">Hire Date *</label>
+                    <label className="block text-xs font-bold text-slate-700">Hire Date <span className="text-rose-500">*</span></label>
                     <input
+                      data-field="hireDate"
                       type="date"
                       value={hireDate}
-                      onChange={(e) => setHireDate(e.target.value)}
-                      className="w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom"
-                      required
+                      onChange={(e) => {
+                        setHireDate(e.target.value);
+                        if (fieldErrors.hireDate) setFieldErrors(p => ({ ...p, hireDate: "" }));
+                      }}
+                      className={fieldInputClass(Boolean(fieldErrors.hireDate), "w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom")}
                     />
+                    <FormFieldError error={fieldErrors.hireDate} />
                   </div>
                   <div className="space-y-1">
                     <label className="block text-xs font-bold text-slate-700">Employee Category</label>
@@ -1300,10 +1441,11 @@ export default function Employees({
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 text-xs font-extrabold text-white bg-primary-custom hover:opacity-90 rounded-lg flex items-center gap-1.5 transition-all shadow-xs"
+                  disabled={isSubmitting}
+                  className="px-4 py-2 text-xs font-extrabold text-white bg-primary-custom hover:opacity-90 rounded-lg flex items-center gap-1.5 transition-all shadow-xs disabled:opacity-50"
                 >
                   <Save className="h-4 w-4 text-accent-custom" />
-                  Save Registration
+                  {isSubmitting ? "Saving..." : "Save Registration"}
                 </button>
               </div>
             </form>
@@ -1322,11 +1464,9 @@ export default function Employees({
               </button>
             </div>
             
-            <form onSubmit={handleEditSubmit} className="p-6 space-y-6">
-              {formError && (
-                <div className="p-3 bg-rose-50 text-rose-800 border border-rose-200 rounded-lg text-xs font-semibold">
-                  {formError}
-                </div>
+            <form onSubmit={handleEditSubmit} noValidate className="p-6 space-y-6">
+              {(formError || Object.keys(fieldErrors).length > 0) && (
+                <ValidationSummary errors={fieldErrors} message={formError} />
               )}
               {formSuccess && (
                 <div className="p-3 bg-emerald-50 text-emerald-800 border border-emerald-200 rounded-lg text-xs font-semibold">
@@ -1339,39 +1479,47 @@ export default function Employees({
                 <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider border-b pb-1">1. Identity &amp; Bio</p>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div className="space-y-1">
-                    <label className="block text-xs font-bold text-slate-700">Gender *</label>
+                    <label className="block text-xs font-bold text-slate-700">Gender <span className="text-rose-500">*</span></label>
                     <select
+                      data-field="gender"
                       value={gender}
                       onChange={(e) => setGender(e.target.value as "Male" | "Female")}
                       className="w-full px-3 py-2 border rounded-lg text-xs bg-white ring-primary-custom"
-                      required
                     >
                       <option value="Male">Male</option>
                       <option value="Female">Female</option>
                     </select>
                   </div>
                   <div className="space-y-1">
-                    <label className="block text-xs font-bold text-slate-700">Date of Birth *</label>
+                    <label className="block text-xs font-bold text-slate-700">Date of Birth <span className="text-rose-500">*</span></label>
                     <input
+                      data-field="dob"
                       type="date"
                       value={dob}
-                      onChange={(e) => setDob(e.target.value)}
-                      className="w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom"
-                      required
+                      onChange={(e) => {
+                        setDob(e.target.value);
+                        if (fieldErrors.dob) setFieldErrors(p => ({ ...p, dob: "" }));
+                      }}
+                      className={fieldInputClass(Boolean(fieldErrors.dob), "w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom")}
                     />
+                    <FormFieldError error={fieldErrors.dob} />
                   </div>
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                   <div className="space-y-1">
-                    <label className="block text-xs font-bold text-slate-700">First Name *</label>
+                    <label className="block text-xs font-bold text-slate-700">First Name <span className="text-rose-500">*</span></label>
                     <input
+                      data-field="firstName"
                       type="text"
                       value={firstName}
-                      onChange={(e) => setFirstName(e.target.value)}
-                      className="w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom"
-                      required
+                      onChange={(e) => {
+                        setFirstName(e.target.value);
+                        if (fieldErrors.firstName) setFieldErrors(p => ({ ...p, firstName: "" }));
+                      }}
+                      className={fieldInputClass(Boolean(fieldErrors.firstName), "w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom")}
                     />
+                    <FormFieldError error={fieldErrors.firstName} />
                   </div>
                   <div className="space-y-1">
                     <label className="block text-xs font-bold text-slate-700">Middle Name</label>
@@ -1383,14 +1531,18 @@ export default function Employees({
                     />
                   </div>
                   <div className="space-y-1">
-                    <label className="block text-xs font-bold text-slate-700">Last Name *</label>
+                    <label className="block text-xs font-bold text-slate-700">Last Name <span className="text-rose-500">*</span></label>
                     <input
+                      data-field="lastName"
                       type="text"
                       value={lastName}
-                      onChange={(e) => setLastName(e.target.value)}
-                      className="w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom"
-                      required
+                      onChange={(e) => {
+                        setLastName(e.target.value);
+                        if (fieldErrors.lastName) setFieldErrors(p => ({ ...p, lastName: "" }));
+                      }}
+                      className={fieldInputClass(Boolean(fieldErrors.lastName), "w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom")}
                     />
+                    <FormFieldError error={fieldErrors.lastName} />
                   </div>
                 </div>
               </div>
@@ -1400,43 +1552,57 @@ export default function Employees({
                 <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider border-b pb-1">2. Contacts</p>
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                   <div className="space-y-1">
-                    <label className="block text-xs font-bold text-slate-700">Work Email</label>
+                    <label className="block text-xs font-bold text-slate-700">Work Email <span className="text-rose-500">*</span></label>
                     <input
+                      data-field="email"
                       type="email"
                       value={email}
-                      onChange={(e) => setEmail(e.target.value)}
-                      className="w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom"
+                      onChange={(e) => {
+                        setEmail(e.target.value);
+                        if (fieldErrors.email) setFieldErrors(p => ({ ...p, email: "" }));
+                      }}
+                      className={fieldInputClass(Boolean(fieldErrors.email), "w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom")}
                     />
+                    <FormFieldError error={fieldErrors.email} />
                   </div>
                   <div className="space-y-1">
-                    <label className="block text-xs font-bold text-slate-700">Phone Number *</label>
+                    <label className="block text-xs font-bold text-slate-700">Phone Number <span className="text-rose-500">*</span></label>
                     <input
+                      data-field="phoneNumber"
                       type="text"
                       value={phoneNumber}
-                      onChange={(e) => setPhoneNumber(e.target.value)}
-                      className="w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom"
-                      required
+                      onChange={(e) => {
+                        setPhoneNumber(e.target.value);
+                        if (fieldErrors.phoneNumber) setFieldErrors(p => ({ ...p, phoneNumber: "" }));
+                      }}
+                      className={fieldInputClass(Boolean(fieldErrors.phoneNumber), "w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom")}
                     />
+                    <FormFieldError error={fieldErrors.phoneNumber} />
                   </div>
                   <div className="space-y-1">
                     <label className="block text-xs font-bold text-slate-700">Alternative Phone</label>
                     <input
+                      data-field="altPhoneNumber"
                       type="text"
                       value={altPhoneNumber}
-                      onChange={(e) => setAltPhoneNumber(e.target.value)}
-                      className="w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom"
+                      onChange={(e) => {
+                        setAltPhoneNumber(e.target.value);
+                        if (fieldErrors.altPhoneNumber) setFieldErrors(p => ({ ...p, altPhoneNumber: "" }));
+                      }}
+                      className={fieldInputClass(Boolean(fieldErrors.altPhoneNumber), "w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom")}
                     />
+                    <FormFieldError error={fieldErrors.altPhoneNumber} />
                   </div>
                 </div>
 
                 <div className="space-y-1">
-                  <label className="block text-xs font-bold text-slate-700">Residential Address *</label>
+                  <label className="block text-xs font-bold text-slate-700">Residential Address</label>
                   <input
+                    data-field="address"
                     type="text"
                     value={address}
                     onChange={(e) => setAddress(e.target.value)}
                     className="w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom"
-                    required
                   />
                 </div>
               </div>
@@ -1446,40 +1612,48 @@ export default function Employees({
                 <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider border-b pb-1">3. Placement &amp; Lifecycle</p>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div className="space-y-1">
-                    <label className="block text-xs font-bold text-slate-700">Department Assignment *</label>
+                    <label className="block text-xs font-bold text-slate-700">Department Assignment <span className="text-rose-500">*</span></label>
                     <select
+                      data-field="departmentId"
                       value={departmentId}
-                      onChange={(e) => setDepartmentId(e.target.value)}
-                      className="w-full px-3 py-2 border rounded-lg text-xs bg-white ring-primary-custom font-bold"
-                      required
+                      onChange={(e) => {
+                        setDepartmentId(e.target.value);
+                        if (fieldErrors.departmentId) setFieldErrors(p => ({ ...p, departmentId: "" }));
+                      }}
+                      className={fieldInputClass(Boolean(fieldErrors.departmentId), "w-full px-3 py-2 border rounded-lg text-xs bg-white ring-primary-custom font-bold")}
                     >
+                      <option value="">-- Select Department --</option>
                       {activeDepartments.map(dept => (
                         <option key={dept.id} value={dept.id}>
                           {dept.name} ({dept.code})
                         </option>
                       ))}
                     </select>
+                    <FormFieldError error={fieldErrors.departmentId} />
                   </div>
                   <div className="space-y-1">
-                    <label className="block text-xs font-bold text-slate-700">Job Title / Position *</label>
+                    <label className="block text-xs font-bold text-slate-700">Job Title / Position <span className="text-rose-500">*</span></label>
                     <input
+                      data-field="position"
                       type="text"
                       value={position}
-                      onChange={(e) => setPosition(e.target.value)}
-                      className="w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom"
-                      required
+                      onChange={(e) => {
+                        setPosition(e.target.value);
+                        if (fieldErrors.position) setFieldErrors(p => ({ ...p, position: "" }));
+                      }}
+                      className={fieldInputClass(Boolean(fieldErrors.position), "w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom")}
                     />
+                    <FormFieldError error={fieldErrors.position} />
                   </div>
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                   <div className="space-y-1">
-                    <label className="block text-xs font-bold text-slate-700">Employment Type *</label>
+                    <label className="block text-xs font-bold text-slate-700">Employment Type <span className="text-rose-500">*</span></label>
                     <select
                       value={employmentType}
                       onChange={(e) => setEmploymentType(e.target.value as any)}
                       className="w-full px-3 py-2 border rounded-lg text-xs bg-white ring-primary-custom font-semibold"
-                      required
                     >
                       <option value="Permanent">Permanent</option>
                       <option value="Contract">Contract</option>
@@ -1488,14 +1662,18 @@ export default function Employees({
                     </select>
                   </div>
                   <div className="space-y-1">
-                    <label className="block text-xs font-bold text-slate-700">Hire Date *</label>
+                    <label className="block text-xs font-bold text-slate-700">Hire Date <span className="text-rose-500">*</span></label>
                     <input
+                      data-field="hireDate"
                       type="date"
                       value={hireDate}
-                      onChange={(e) => setHireDate(e.target.value)}
-                      className="w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom"
-                      required
+                      onChange={(e) => {
+                        setHireDate(e.target.value);
+                        if (fieldErrors.hireDate) setFieldErrors(p => ({ ...p, hireDate: "" }));
+                      }}
+                      className={fieldInputClass(Boolean(fieldErrors.hireDate), "w-full px-3 py-2 border rounded-lg text-xs ring-primary-custom")}
                     />
+                    <FormFieldError error={fieldErrors.hireDate} />
                   </div>
                   <div className="space-y-1">
                     <label className="block text-xs font-bold text-slate-700">Employment Status</label>
@@ -1521,10 +1699,11 @@ export default function Employees({
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 text-xs font-extrabold text-white bg-primary-custom hover:opacity-90 rounded-lg flex items-center gap-1.5 transition-all shadow-xs"
+                  disabled={isSubmitting}
+                  className="px-4 py-2 text-xs font-extrabold text-white bg-primary-custom hover:opacity-90 rounded-lg flex items-center gap-1.5 transition-all shadow-xs disabled:opacity-50"
                 >
                   <Save className="h-4 w-4 text-accent-custom" />
-                  Save Changes
+                  {isSubmitting ? "Saving..." : "Save Changes"}
                 </button>
               </div>
             </form>
@@ -1997,6 +2176,22 @@ export default function Employees({
           </div>
         </div>
       )}
+
+      <ConfirmDialog
+        isOpen={Boolean(confirmDeleteEmp)}
+        title="Confirm Employee Record Archive"
+        message={
+          confirmDeleteEmp ? (
+            <>
+              Are you sure you want to delete employee <strong>{confirmDeleteEmp.fullName}</strong> (<code>{confirmDeleteEmp.employeeId}</code>)? This will archive the record for audit compliance.
+            </>
+          ) : null
+        }
+        confirmText="Archive Record"
+        variant="danger"
+        onConfirm={executeDeleteEmployee}
+        onCancel={() => setConfirmDeleteEmp(null)}
+      />
     </div>
   );
 }

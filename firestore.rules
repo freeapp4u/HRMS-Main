@@ -3,7 +3,24 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // Helper functions
+    // Default deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Core helper functions
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
     function isSignedIn() {
       return request.auth != null;
     }
@@ -56,12 +73,12 @@ service cloud.firestore {
     function isOwnerEmail(email) {
       return isEmailVerified() &&
         request.auth.token.email != null &&
-        email != null &&
+        email is string &&
         request.auth.token.email.lower() == email.lower();
     }
 
     function isOwnerUid(uid) {
-      return isSignedIn() && request.auth.uid == uid;
+      return isSignedIn() && uid is string && request.auth.uid == uid;
     }
 
     function getEmployeeId() {
@@ -70,14 +87,55 @@ service cloud.firestore {
 
     function isOwnRecord(employeeId) {
       return isEmailVerified() &&
-        employeeId != null &&
-        getEmployeeId() != null &&
+        employeeId is string &&
+        getEmployeeId() is string &&
         getEmployeeId() == employeeId;
     }
 
-    // Default deny rule
-    match /{document=**} {
-      allow read, write: if false;
+    // Entity validation blueprints
+    function isValidUser(data) {
+      return data.id is string && data.id.size() >= 1 && data.id.size() <= 128 &&
+        data.fullName is string && data.fullName.size() >= 1 && data.fullName.size() <= 256 &&
+        data.email is string && data.email.size() >= 3 && data.email.size() <= 256 &&
+        data.role is string && data.role.size() >= 1 && data.role.size() <= 128 &&
+        data.status in ['Active', 'Inactive', 'Pending Verification', 'Suspended'];
+    }
+
+    function isValidHRRequest(data) {
+      return data.keys().hasAll(['id', 'employeeId', 'employeeName', 'requestType', 'subject', 'description', 'status', 'createdDate', 'updatedDate']) &&
+        isValidId(data.id) &&
+        isValidId(data.employeeId) &&
+        data.employeeName is string && data.employeeName.size() <= 256 &&
+        data.requestType in ['profile_update', 'attendance_correction', 'letter_request', 'general_hr'] &&
+        data.subject is string && data.subject.size() >= 2 && data.subject.size() <= 256 &&
+        data.description is string && data.description.size() >= 3 && data.description.size() <= 2000 &&
+        data.status in ['Pending', 'Approved', 'Rejected', 'Cancelled'] &&
+        data.createdDate is string && data.createdDate.size() <= 64 &&
+        data.updatedDate is string && data.updatedDate.size() <= 64;
+    }
+
+    function isValidNotification(data) {
+      return data.keys().hasAll(['id', 'title', 'message', 'category', 'isRead', 'createdDate', 'createdBy']) &&
+        isValidId(data.id) &&
+        data.title is string && data.title.size() >= 1 && data.title.size() <= 256 &&
+        data.message is string && data.message.size() >= 1 && data.message.size() <= 2000 &&
+        data.category in ['personal', 'announcement'] &&
+        data.isRead is bool &&
+        data.createdDate is string && data.createdDate.size() <= 64 &&
+        data.createdBy is string && data.createdBy.size() <= 256;
+    }
+
+    function isValidDriveAssociation(data) {
+      return data.keys().hasAll(['id', 'fileId', 'fileName', 'fileLink', 'targetType', 'targetId', 'targetName', 'linkedBy', 'linkedDate']) &&
+        isValidId(data.id) &&
+        data.fileId is string && data.fileId.size() <= 256 &&
+        data.fileName is string && data.fileName.size() <= 256 &&
+        data.fileLink is string && data.fileLink.size() <= 1024 &&
+        data.targetType in ['Employee', 'Department'] &&
+        data.targetId is string && data.targetId.size() <= 128 &&
+        data.targetName is string && data.targetName.size() <= 256 &&
+        data.linkedBy is string && data.linkedBy.size() <= 256 &&
+        data.linkedDate is string && data.linkedDate.size() <= 64;
     }
 
     // Connection verification endpoint
@@ -85,51 +143,66 @@ service cloud.firestore {
       allow read: if isSignedIn();
     }
 
-    // User Accounts collection
+    // User Accounts collection (strict PII & anti-escalation isolation)
     match /users/{userId} {
-      allow read: if isSignedIn() && (isOwnerUid(userId) || isStaff() || isAuditor());
-      // During registration, newly created user is signed in before email verification:
-      // permit creating their own user doc strictly with Employee role (or Administrator only for designated admin emails)
-      allow create: if isSignedIn() && (
+      allow get: if isSignedIn() && isValidId(userId) && (isOwnerUid(userId) || isStaff() || isAuditor());
+      allow list: if isStaff() || isAuditor();
+      allow create: if isSignedIn() && isValidId(userId) && isValidUser(incoming()) && (
         isAdmin() ||
         (
-          isOwnerUid(userId) && (
-            request.resource.data.role == 'Employee' ||
+          isOwnerUid(userId) &&
+          !incoming().keys().hasAny(['permissionOverrides']) &&
+          (
+            incoming().role == 'Employee' ||
             (
               request.auth.token.email != null &&
               request.auth.token.email.lower() in ['contactesfaye@gmail.com', 'tesfayeteklufeyissa@gmail.com'] &&
-              request.resource.data.role == 'Administrator'
+              incoming().role == 'Administrator'
             )
           )
         )
       );
-      allow update: if isSignedIn() && (
+      allow update: if isSignedIn() && isValidId(userId) && isValidUser(incoming()) && (
         isAdmin() ||
         (
           isOwnerUid(userId) &&
-          !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role'])
+          isEmailVerified() &&
+          incoming().id == existing().id &&
+          incoming().email == existing().email &&
+          incoming().role == existing().role &&
+          incoming().status == existing().status &&
+          incoming().get('employeeId', null) == existing().get('employeeId', null) &&
+          incoming().get('permissionOverrides', null) == existing().get('permissionOverrides', null) &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['lastLogin', 'emailVerified', 'fullName', 'ownerUid'])
         )
       );
-      allow delete: if isAdmin();
+      allow delete: if isAdmin() && isValidId(userId);
     }
 
     // Employee Master records
     match /employees/{empId} {
-      allow read: if isEmailVerified() && (
+      allow get: if isEmailVerified() && isValidId(empId) && (
         isStaff() ||
         isAuditor() ||
         isDepartmentHead() ||
         isOwnRecord(empId) ||
-        isOwnerEmail(resource.data.email)
+        isOwnerEmail(existing().email)
       );
-      allow create, update: if isStaff();
-      allow delete: if isAdmin();
+      allow list: if isEmailVerified() && (
+        isStaff() ||
+        isAuditor() ||
+        isDepartmentHead() ||
+        isOwnRecord(existing().employeeId) ||
+        isOwnerEmail(existing().email)
+      );
+      allow create, update: if isStaff() && isValidId(empId);
+      allow delete: if isAdmin() && isValidId(empId);
     }
 
     // Departments
     match /departments/{deptId} {
       allow read: if isEmailVerified();
-      allow write: if isAdmin();
+      allow write: if isAdmin() && isValidId(deptId);
     }
 
     // Attendance Records
@@ -138,11 +211,10 @@ service cloud.firestore {
         isStaff() ||
         isAuditor() ||
         isDepartmentHead() ||
-        isOwnRecord(resource.data.employeeId) ||
-        isOwnerEmail(resource.data.employeeEmail)
+        isOwnRecord(existing().employeeId) ||
+        isOwnerEmail(existing().get('employeeEmail', null))
       );
-      allow create, update: if isStaff();
-      allow delete: if isStaff();
+      allow create, update, delete: if isStaff() && isValidId(attId);
     }
 
     // Leave Applications & Records
@@ -151,148 +223,206 @@ service cloud.firestore {
         isStaff() ||
         isAuditor() ||
         isDepartmentHead() ||
-        isOwnRecord(resource.data.employeeId) ||
-        isOwnerEmail(resource.data.employeeEmail)
+        isOwnRecord(existing().employeeId) ||
+        isOwnerEmail(existing().get('employeeEmail', null))
       );
-      allow create: if isEmailVerified() && (
+      allow create: if isEmailVerified() && isValidId(leaveId) && (
         isStaff() ||
         isDepartmentHead() ||
-        isOwnRecord(request.resource.data.employeeId)
+        (isOwnRecord(incoming().employeeId) && incoming().status == 'Active')
       );
-      allow update: if isStaff() || isDepartmentHead() || (
-        isEmployee() &&
-        isOwnRecord(resource.data.employeeId) &&
-        resource.data.status == 'Active' &&
-        !request.resource.data.diff(resource.data).affectedKeys().hasAny(['status', 'recordedBy'])
+      allow update: if isEmailVerified() && isValidId(leaveId) && (
+        isStaff() ||
+        isDepartmentHead() ||
+        (
+          isEmployee() &&
+          isOwnRecord(existing().employeeId) &&
+          existing().status == 'Active' &&
+          incoming().status == 'Cancelled' &&
+          incoming().employeeId == existing().employeeId &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedDate']) &&
+          incoming().updatedDate is string && incoming().updatedDate.size() <= 64
+        )
       );
-      allow delete: if isStaff();
+      allow delete: if isStaff() && isValidId(leaveId);
     }
 
-    // Payslips & Payroll Records
+    // Payslips & Payroll Records (strictly read-only for Employees on own records)
     match /payslips/{payslipId} {
       allow read: if isEmailVerified() && (
         isStaff() ||
         isAuditor() ||
-        isOwnRecord(resource.data.employeeId) ||
-        isOwnerEmail(resource.data.recipientEmail)
+        isOwnRecord(existing().employeeId) ||
+        isOwnerEmail(existing().get('recipientEmail', null))
       );
-      allow write: if isStaff();
-      allow delete: if isAdmin();
+      allow write: if isStaff() && isValidId(payslipId);
+      allow delete: if isAdmin() && isValidId(payslipId);
     }
 
     match /payroll_records/{recordId} {
       allow read: if isEmailVerified() && (
         isStaff() ||
         isAuditor() ||
-        isOwnRecord(resource.data.employeeId) ||
-        isOwnerEmail(resource.data.employeeEmail)
+        isOwnRecord(existing().employeeId) ||
+        isOwnerEmail(existing().get('employeeEmail', null))
       );
-      allow write: if isStaff();
-      allow delete: if isAdmin();
+      allow write: if isStaff() && isValidId(recordId);
+      allow delete: if isAdmin() && isValidId(recordId);
     }
 
     // Salary Components & Periods
     match /salary_components/{compId} {
       allow read: if isEmailVerified();
-      allow write: if isAdmin();
+      allow write: if isAdmin() && isValidId(compId);
     }
 
     match /payroll_periods/{periodId} {
       allow read: if isEmailVerified();
-      allow write: if isAdmin();
+      allow write: if isAdmin() && isValidId(periodId);
     }
 
     match /employee_salary_structures/{structId} {
-      allow read: if isEmailVerified() && (isStaff() || isAuditor() || isOwnRecord(resource.data.employeeId));
-      allow write: if isStaff();
+      allow read: if isEmailVerified() && (isStaff() || isAuditor() || isOwnRecord(existing().employeeId));
+      allow write: if isStaff() && isValidId(structId);
     }
 
     // Family Members & Medical Expenses
     match /family_members/{fmId} {
-      allow read: if isEmailVerified() && (isStaff() || isAuditor() || isOwnRecord(resource.data.employeeId));
-      allow create, update: if isEmailVerified() && (isStaff() || isOwnRecord(request.resource.data.employeeId));
-      allow delete: if isStaff();
+      allow read: if isEmailVerified() && (isStaff() || isAuditor() || isOwnRecord(existing().employeeId));
+      allow create, update: if isEmailVerified() && isValidId(fmId) && (isStaff() || isOwnRecord(incoming().employeeId));
+      allow delete: if isStaff() && isValidId(fmId);
     }
 
     match /medical_expenses/{expId} {
-      allow read: if isEmailVerified() && (isStaff() || isAuditor() || isOwnRecord(resource.data.employeeId));
-      allow create, update: if isEmailVerified() && (isStaff() || isOwnRecord(request.resource.data.employeeId));
-      allow delete: if isStaff();
+      allow read: if isEmailVerified() && (isStaff() || isAuditor() || isOwnRecord(existing().employeeId));
+      allow create, update: if isEmailVerified() && isValidId(expId) && (isStaff() || isOwnRecord(incoming().employeeId));
+      allow delete: if isStaff() && isValidId(expId);
     }
 
     match /tax_configurations/{taxId} {
       allow read: if isEmailVerified();
-      allow write: if isAdmin();
+      allow write: if isAdmin() && isValidId(taxId);
     }
 
     match /payroll_approvals/{approvalId} {
       allow read: if isEmailVerified() && (isStaff() || isAuditor());
-      allow write: if isStaff();
+      allow write: if isStaff() && isValidId(approvalId);
     }
 
     match /payroll_import_logs/{logId} {
       allow read: if isEmailVerified() && (isStaff() || isAuditor());
-      allow write: if isStaff();
+      allow write: if isStaff() && isValidId(logId);
     }
 
     match /payroll_settings/{settingId} {
       allow read: if isEmailVerified();
-      allow write: if isAdmin();
+      allow write: if isAdmin() && isValidId(settingId);
     }
 
     match /payslip_distribution_logs/{logId} {
       allow read: if isEmailVerified() && (isStaff() || isAuditor());
-      allow write: if isStaff();
+      allow write: if isStaff() && isValidId(logId);
     }
 
     // System Roles & Dynamic Role Permissions (RBAC)
     match /roles/{roleId} {
       allow read: if isEmailVerified();
-      allow write: if isAdmin();
+      allow write: if isAdmin() && isValidId(roleId);
     }
 
     match /role_permissions/{permId} {
       allow read: if isEmailVerified();
-      allow write: if isAdmin();
+      allow write: if isAdmin() && isValidId(permId);
     }
 
     // Company Config & Public Holidays & Activity Logs
     match /config/{configId} {
       allow read: if isEmailVerified();
-      allow write: if isAdmin();
+      allow write: if isAdmin() && isValidId(configId);
     }
 
     match /holidays/{holidayId} {
       allow read: if isEmailVerified();
-      allow write: if isStaff();
+      allow write: if isStaff() && isValidId(holidayId);
     }
 
     match /logs/{logId} {
       allow read: if isStaff() || isAuditor();
-      allow create: if isEmailVerified();
-      allow update, delete: if isAdmin();
+      allow create: if isEmailVerified() && !isEmployee() && isValidId(logId);
+      allow update, delete: if isAdmin() && isValidId(logId);
     }
 
     match /email_logs/{logId} {
       allow read: if isStaff() || isAuditor();
-      allow create: if isEmailVerified();
-      allow update, delete: if isAdmin();
+      allow create: if isEmailVerified() && !isEmployee() && isValidId(logId);
+      allow update, delete: if isAdmin() && isValidId(logId);
     }
 
     match /email_delivery_logs/{logId} {
       allow read: if isStaff() || isAuditor();
-      allow write: if isAdmin();
+      allow write: if isAdmin() && isValidId(logId);
     }
 
+    // ESS HR Requests
+    match /hr_requests/{reqId} {
+      allow read: if isEmailVerified() && (
+        isStaff() ||
+        isAuditor() ||
+        isDepartmentHead() ||
+        isOwnRecord(existing().employeeId)
+      );
+      allow create: if isEmailVerified() && isValidId(reqId) && isValidHRRequest(incoming()) && (
+        isStaff() ||
+        (isOwnRecord(incoming().employeeId) && incoming().status == 'Pending')
+      );
+      allow update: if isEmailVerified() && isValidId(reqId) && isValidHRRequest(incoming()) && (
+        isStaff() ||
+        (
+          isOwnRecord(existing().employeeId) &&
+          existing().status == 'Pending' &&
+          incoming().status == 'Cancelled' &&
+          incoming().employeeId == existing().employeeId &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedDate'])
+        )
+      );
+      allow delete: if isStaff() && isValidId(reqId);
+    }
+
+    // Personal Notifications & HR Announcements
+    match /notifications/{notifId} {
+      allow read: if isEmailVerified() && (
+        isStaff() ||
+        isAuditor() ||
+        existing().category == 'announcement' ||
+        ('recipientEmployeeId' in existing() && isOwnRecord(existing().recipientEmployeeId)) ||
+        ('ownerUid' in existing() && isOwnerUid(existing().ownerUid))
+      );
+      allow create: if isEmailVerified() && isValidId(notifId) && isStaff() && isValidNotification(incoming());
+      allow update: if isEmailVerified() && isValidId(notifId) && isValidNotification(incoming()) && (
+        isStaff() ||
+        (
+          (
+            existing().category == 'announcement' ||
+            ('recipientEmployeeId' in existing() && isOwnRecord(existing().recipientEmployeeId))
+          ) &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['isRead', 'readByUserIds']) &&
+          incoming().get('readByUserIds', []) is list &&
+          incoming().get('readByUserIds', []).size() <= 500
+        )
+      );
+      allow delete: if isStaff() && isValidId(notifId);
+    }
+
+    // Linked Employee & Department Documents Metadata
     match /drive_associations/{assocId} {
       allow read: if isEmailVerified() && (
         isStaff() ||
         isAuditor() ||
-        (resource.data.targetType == 'Employee' && isOwnRecord(resource.data.targetId)) ||
-        resource.data.targetType == 'Department'
+        (isDepartmentHead() && existing().targetType == 'Department') ||
+        (existing().targetType == 'Employee' && isOwnRecord(existing().targetId))
       );
-      allow create, update: if isStaff();
-      allow delete: if isAdmin() || isHROfficer();
+      allow create, update: if isStaff() && isValidId(assocId) && isValidDriveAssociation(incoming());
+      allow delete: if isStaff() && isValidId(assocId);
     }
   }
 }

@@ -1,9 +1,15 @@
 import React, { useState, useMemo, useEffect } from "react";
-import { SystemRole, RolePermissions, ActionPermissions, User, CompanyConfig } from "../types";
-import { APP_MODULES, DEFAULT_ACTIONS } from "../config/permissions";
+import { SystemRole, RolePermissions, ActionPermissions, User, CompanyConfig, DataScope } from "../types";
+import {
+  APP_MODULES,
+  EMPLOYEE_BLOCKED_ADMIN_MODULES,
+  getModuleLabelForRole,
+  getModuleSubmenusForRole,
+} from "../config/permissions";
 import {
   createEmptyModulePermissions,
   enforceAdminSafeguard,
+  getDefaultDataScope,
   getDefaultRolePermissions,
   normalizeRolePermissions
 } from "../utils/rbacUtils";
@@ -14,6 +20,9 @@ import {
 import ReportPrintButton from "./reports/ReportPrintButton";
 import ReportPDFExportButton from "./reports/ReportPDFExportButton";
 import { formatReportDateTime, ReportExportPayload } from "../utils/reportBranding";
+import { useToast } from "./ui/ToastProvider";
+import { FormFieldError, ValidationSummary, fieldInputClass } from "./ui/FormFeedback";
+import { validateRoleModalForm, focusFirstInvalidField } from "../utils/validation";
 
 interface RoleMatrixProps {
   roles: SystemRole[];
@@ -48,11 +57,14 @@ export default function RoleMatrix({
   const [searchTerm, setSearchTerm] = useState("");
   const [roleSearch, setRoleSearch] = useState("");
 
+  const { showSuccess, showError, showInfo } = useToast();
+
   // Create / Edit Role Modal
   const [showRoleModal, setShowRoleModal] = useState(false);
   const [editingRole, setEditingRole] = useState<SystemRole | null>(null);
   const [roleName, setRoleName] = useState("");
   const [roleDesc, setRoleDesc] = useState("");
+  const [roleFieldErrors, setRoleFieldErrors] = useState<Record<string, string>>({});
 
   // Confirmation & Feedback states
   const [confirmSaveOpen, setConfirmSaveOpen] = useState(false);
@@ -88,6 +100,9 @@ export default function RoleMatrix({
 
   const showBanner = (type: "success" | "error" | "info", text: string) => {
     setStatusBanner({ type, text });
+    if (type === "error") showError(text);
+    else if (type === "success") showSuccess(text);
+    else showInfo(text);
     setTimeout(() => {
       setStatusBanner(prev => (prev?.text === text ? null : prev));
     }, 4500);
@@ -107,6 +122,10 @@ export default function RoleMatrix({
 
     const updated: RolePermissions = JSON.parse(JSON.stringify(localPermissions));
     const modulePerm = updated.modulePermissions[moduleId];
+    if (selectedRole?.id === "Employee" && EMPLOYEE_BLOCKED_ADMIN_MODULES.has(moduleId) && !modulePerm.enabled) {
+      showBanner("error", "Safeguard: Administrative modules must remain hidden for the Employee Self-Service role.");
+      return;
+    }
     modulePerm.enabled = !modulePerm.enabled;
 
     if (!modulePerm.enabled) {
@@ -119,10 +138,11 @@ export default function RoleMatrix({
     } else {
       modulePerm.actions.view = true;
       const modMeta = APP_MODULES.find(m => m.id === moduleId);
-      if (modMeta && modMeta.submenus.length > 0) {
+      const roleSubmenus = modMeta ? getModuleSubmenusForRole(modMeta, selectedRole?.id) : [];
+      if (roleSubmenus.length > 0) {
         const anySubEnabled = Object.values(modulePerm.submenus).some(Boolean);
         if (!anySubEnabled) {
-          modulePerm.submenus[modMeta.submenus[0].id] = true;
+          modulePerm.submenus[roleSubmenus[0].id] = true;
         }
       }
     }
@@ -178,6 +198,18 @@ export default function RoleMatrix({
       }
     }
 
+    setLocalPermissions(updated);
+    setHasUnsavedChanges(true);
+  };
+
+  const handleChangeDataScope = (moduleId: string, scope: DataScope) => {
+    if (!localPermissions || !canEdit) return;
+    if (selectedRole?.id === "Employee" && scope !== "own") {
+      showBanner("error", "Safeguard: Employee role data access scope is strictly locked to Own Records Only.");
+      return;
+    }
+    const updated: RolePermissions = JSON.parse(JSON.stringify(localPermissions));
+    updated.modulePermissions[moduleId].dataScope = scope;
     setLocalPermissions(updated);
     setHasUnsavedChanges(true);
   };
@@ -239,9 +271,15 @@ export default function RoleMatrix({
 
     setIsSaving(true);
     const timestamp = new Date().toISOString();
+    const baseClean: RolePermissions = {
+      ...localPermissions,
+      essMigrated: selectedRole.id === "Employee" ? true : localPermissions.essMigrated,
+      updatedAt: timestamp,
+      updatedBy: currentUser?.email || "Admin",
+    };
     const cleanPerm = selectedRole.id === "Administrator"
-      ? enforceAdminSafeguard({ ...localPermissions, updatedAt: timestamp, updatedBy: currentUser?.email || "Admin" })
-      : { ...localPermissions, updatedAt: timestamp, updatedBy: currentUser?.email || "Admin" };
+      ? enforceAdminSafeguard(baseClean)
+      : baseClean;
 
     const existsInList = rolePermissions.some(p => p.roleId === selectedRole.id);
     const updatedPerms = existsInList
@@ -271,6 +309,7 @@ export default function RoleMatrix({
     setEditingRole(null);
     setRoleName("");
     setRoleDesc("");
+    setRoleFieldErrors({});
     setShowRoleModal(true);
   };
 
@@ -278,23 +317,27 @@ export default function RoleMatrix({
     setEditingRole(role);
     setRoleName(role.name);
     setRoleDesc(role.description);
+    setRoleFieldErrors({});
     setShowRoleModal(true);
   };
 
   const handleSaveRoleModal = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!roleName.trim()) return;
+    const check = validateRoleModalForm(
+      { editingRole, roleName, roleDesc },
+      roles
+    );
+    if (!check.valid) {
+      setRoleFieldErrors(check.errors);
+      focusFirstInvalidField(check.errors);
+      return;
+    }
+    setRoleFieldErrors({});
 
     const today = new Date().toISOString().split("T")[0];
 
     if (editingRole) {
       const updatedName = editingRole.isSystem ? editingRole.name : roleName.trim();
-      const duplicate = roles.some(r => r.id !== editingRole.id && r.name.toLowerCase() === updatedName.toLowerCase());
-      if (duplicate) {
-        showBanner("error", `A role named "${updatedName}" already exists.`);
-        return;
-      }
-
       const updatedRoles = roles.map(r =>
         r.id === editingRole.id
           ? { ...r, name: updatedName, description: roleDesc.trim(), updatedDate: today }
@@ -310,18 +353,6 @@ export default function RoleMatrix({
 
     const candidateName = roleName.trim();
     const candidateId = candidateName.replace(/[^a-zA-Z0-9_\- ]/g, "").replace(/\s+/g, "_");
-    if (!candidateId) {
-      showBanner("error", "Role name must contain alphanumeric characters.");
-      return;
-    }
-
-    const exists = roles.some(
-      r => r.id.toLowerCase() === candidateId.toLowerCase() || r.name.toLowerCase() === candidateName.toLowerCase()
-    );
-    if (exists) {
-      showBanner("error", `Role "${candidateName}" already exists.`);
-      return;
-    }
 
     const newRole: SystemRole = {
       id: candidateId,
@@ -336,7 +367,7 @@ export default function RoleMatrix({
     const newPerm: RolePermissions = {
       id: newRole.id,
       roleId: newRole.id,
-      modulePermissions: createEmptyModulePermissions(),
+      modulePermissions: createEmptyModulePermissions(newRole.id),
       updatedBy: currentUser?.email || "Admin",
       updatedAt: new Date().toISOString()
     };
@@ -404,10 +435,15 @@ export default function RoleMatrix({
     return Object.values(localPermissions.modulePermissions).filter((m: any) => m?.enabled).length;
   }, [localPermissions]);
 
-  const filteredModules = APP_MODULES.filter(m =>
-    m.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    m.submenus.some(s => s.name.toLowerCase().includes(searchTerm.toLowerCase()))
-  );
+  const filteredModules = APP_MODULES.filter(m => {
+    const label = getModuleLabelForRole(m, selectedRole?.id);
+    const subs = getModuleSubmenusForRole(m, selectedRole?.id);
+    return (
+      label.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      m.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      subs.some(s => s.name.toLowerCase().includes(searchTerm.toLowerCase()))
+    );
+  });
 
   const visibleRoles = roles.filter(r =>
     r.name.toLowerCase().includes(roleSearch.toLowerCase()) ||
@@ -436,13 +472,16 @@ export default function RoleMatrix({
     const matrixRows = selectedRole && activePerm
       ? APP_MODULES.map(mod => {
           const mp = activePerm.modulePermissions[mod.id];
-          const enabledSubs = mod.submenus
+          const subs = getModuleSubmenusForRole(mod, selectedRole.id);
+          const enabledSubs = subs
             .filter(s => mp?.submenus?.[s.id] !== false)
             .map(s => s.name);
+          const scopeLabel = mp?.dataScope || getDefaultDataScope(selectedRole.id);
           return [
-            mod.name,
+            getModuleLabelForRole(mod, selectedRole.id),
             mp?.enabled ? "Enabled" : "Disabled",
-            mod.submenus.length === 0 ? "Standard" : enabledSubs.length > 0 ? enabledSubs.join(", ") : "None",
+            scopeLabel.toUpperCase(),
+            subs.length === 0 ? "Standard" : enabledSubs.length > 0 ? enabledSubs.join(", ") : "None",
             mp?.actions.view ? "Yes" : "No",
             mp?.actions.create ? "Yes" : "No",
             mp?.actions.edit ? "Yes" : "No",
@@ -484,6 +523,7 @@ export default function RoleMatrix({
               columns: [
                 { header: "Module", align: "left" },
                 { header: "Access", align: "center" },
+                { header: "Data Scope", align: "center" },
                 { header: "Enabled Submenus", align: "left" },
                 { header: "View", align: "center" },
                 { header: "Create", align: "center" },
@@ -766,10 +806,11 @@ export default function RoleMatrix({
             </div>
 
             <div className="overflow-x-auto">
-              <table className="w-full text-left border-collapse min-w-[800px]">
+              <table className="w-full text-left border-collapse min-w-[880px]">
                 <thead>
                   <tr className="bg-slate-50 border-b border-slate-200 text-[10px] font-black uppercase tracking-wider text-slate-400">
                     <th className="px-6 py-3 w-1/3">Module &amp; Hierarchy</th>
+                    <th className="px-3 py-3 text-center">Scope</th>
                     <th className="px-3 py-3 text-center">View</th>
                     <th className="px-3 py-3 text-center">Create</th>
                     <th className="px-3 py-3 text-center">Edit</th>
@@ -782,6 +823,12 @@ export default function RoleMatrix({
                   {filteredModules.map(module => {
                     const localModule = localPermissions?.modulePermissions[module.id];
                     if (!localModule) return null;
+                    const moduleLabel = getModuleLabelForRole(module, selectedRole?.id);
+                    const roleSubmenus = getModuleSubmenusForRole(module, selectedRole?.id);
+                    const isEmpBlocked = selectedRole?.id === "Employee" && EMPLOYEE_BLOCKED_ADMIN_MODULES.has(module.id);
+                    const currentScope = selectedRole?.id === "Employee"
+                      ? "own"
+                      : (localModule.dataScope || getDefaultDataScope(selectedRole?.id));
 
                     return (
                       <React.Fragment key={module.id}>
@@ -791,29 +838,53 @@ export default function RoleMatrix({
                               <input
                                 type="checkbox"
                                 checked={localModule.enabled}
-                                disabled={!canEdit}
+                                disabled={!canEdit || isEmpBlocked}
                                 onChange={() => handleToggleModule(module.id)}
                                 className="h-3.5 w-3.5 rounded border-slate-300 text-primary-custom focus:ring-primary-custom disabled:opacity-50"
                               />
-                              <span className={`text-xs font-bold ${localModule.enabled ? "text-slate-800" : "text-slate-400"}`}>
-                                {module.name}
-                              </span>
+                              <div>
+                                <span className={`text-xs font-bold block ${localModule.enabled ? "text-slate-800" : "text-slate-400"}`}>
+                                  {moduleLabel}
+                                </span>
+                                {moduleLabel !== module.name && (
+                                  <span className="text-[10px] text-slate-400 font-medium">
+                                    System Module: {module.name}
+                                  </span>
+                                )}
+                                {isEmpBlocked && (
+                                  <span className="text-[9px] text-rose-500 font-bold uppercase block">
+                                    Hidden for Employee Self-Service
+                                  </span>
+                                )}
+                              </div>
                             </div>
+                          </td>
+                          <td className="px-3 py-4 text-center">
+                            <select
+                              value={currentScope}
+                              disabled={!localModule.enabled || !canEdit || selectedRole?.id === "Employee"}
+                              onChange={(e) => handleChangeDataScope(module.id, e.target.value as DataScope)}
+                              className="text-[10px] font-bold bg-slate-50 border border-slate-200 rounded px-2 py-1 text-slate-700 disabled:opacity-50"
+                            >
+                              <option value="own">Own Only</option>
+                              <option value="team">Team / Dept</option>
+                              <option value="all">All Company</option>
+                            </select>
                           </td>
                           {(["view", "create", "edit", "delete", "approve", "export"] as (keyof ActionPermissions)[]).map(action => (
                             <td key={action} className="px-3 py-4 text-center">
                               <input
                                 type="checkbox"
                                 checked={localModule.actions[action]}
-                                disabled={!localModule.enabled || !canEdit}
+                                disabled={!localModule.enabled || !canEdit || isEmpBlocked}
                                 onChange={() => handleToggleAction(module.id, action)}
                                 className="h-3.5 w-3.5 rounded border-slate-300 text-primary-custom focus:ring-primary-custom disabled:opacity-30"
                               />
                             </td>
                           ))}
                         </tr>
-                        {module.submenus.length > 0 && localModule.enabled && (
-                          module.submenus.map(sub => (
+                        {roleSubmenus.length > 0 && localModule.enabled && (
+                          roleSubmenus.map(sub => (
                             <tr key={sub.id} className="bg-slate-50/30 border-l-4 border-l-primary-custom/20">
                               <td className="px-12 py-2.5">
                                 <div className="flex items-center gap-2">
@@ -827,7 +898,7 @@ export default function RoleMatrix({
                                   <span className="text-[11px] font-semibold text-slate-600">{sub.name}</span>
                                 </div>
                               </td>
-                              <td colSpan={6} className="px-3 py-2.5 text-[10px] text-slate-400">
+                              <td colSpan={7} className="px-3 py-2.5 text-[10px] text-slate-400">
                                 Submenu visibility
                               </td>
                             </tr>
@@ -855,29 +926,41 @@ export default function RoleMatrix({
                 <X className="h-4 w-4" />
               </button>
             </div>
-            <form onSubmit={handleSaveRoleModal} className="p-6 space-y-4">
+            <form onSubmit={handleSaveRoleModal} noValidate className="p-6 space-y-4">
+              {Object.keys(roleFieldErrors).length > 0 && (
+                <ValidationSummary errors={roleFieldErrors} />
+              )}
               <div className="space-y-1">
-                <label className="text-[10px] font-black uppercase text-slate-400">Role Name</label>
+                <label className="text-[10px] font-black uppercase text-slate-400">Role Name <span className="text-rose-500">*</span></label>
                 <input
+                  data-field="roleName"
                   autoFocus
-                  required
                   disabled={Boolean(editingRole?.isSystem)}
                   type="text"
                   value={roleName}
-                  onChange={(e) => setRoleName(e.target.value)}
+                  onChange={(e) => {
+                    setRoleName(e.target.value);
+                    if (roleFieldErrors.roleName) setRoleFieldErrors(p => ({ ...p, roleName: "" }));
+                  }}
                   placeholder="e.g. Finance Officer"
-                  className="w-full px-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold focus:bg-white focus:ring-2 focus:ring-primary-custom disabled:opacity-60"
+                  className={fieldInputClass(Boolean(roleFieldErrors.roleName), "w-full px-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold focus:bg-white focus:ring-2 focus:ring-primary-custom disabled:opacity-60")}
                 />
+                <FormFieldError error={roleFieldErrors.roleName} />
               </div>
               <div className="space-y-1">
-                <label className="text-[10px] font-black uppercase text-slate-400">Description</label>
+                <label className="text-[10px] font-black uppercase text-slate-400">Description <span className="text-rose-500">*</span></label>
                 <textarea
+                  data-field="roleDesc"
                   rows={3}
                   value={roleDesc}
-                  onChange={(e) => setRoleDesc(e.target.value)}
+                  onChange={(e) => {
+                    setRoleDesc(e.target.value);
+                    if (roleFieldErrors.roleDesc) setRoleFieldErrors(p => ({ ...p, roleDesc: "" }));
+                  }}
                   placeholder="Describe the responsibilities of this role..."
-                  className="w-full px-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-medium focus:bg-white focus:ring-2 focus:ring-primary-custom"
+                  className={fieldInputClass(Boolean(roleFieldErrors.roleDesc), "w-full px-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-medium focus:bg-white focus:ring-2 focus:ring-primary-custom")}
                 />
+                <FormFieldError error={roleFieldErrors.roleDesc} />
               </div>
               {!editingRole && (
                 <div className="bg-amber-50 border border-amber-200 p-3 rounded-xl flex gap-3">

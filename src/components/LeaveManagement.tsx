@@ -4,7 +4,7 @@ import {
   LeaveTypeConfig, LeaveYearConfig, EmployeeLeaveBalance, LeaveBalanceAdjustment, YearEndProcessingRecord 
 } from "../types";
 import { calculateWorkingDaysCount, checkLeaveOverlap, calculateEmployeeLeaveBalance } from "../utils/leaveUtils";
-import { getDepartmentHeadManagedDeptIds } from "../utils/rbacUtils";
+import { getDepartmentHeadManagedDeptIds, resolveOwnEmployeeRecord } from "../utils/rbacUtils";
 import { formatReportDateTime, ReportExportPayload } from "../utils/reportBranding";
 import CompanyReportHeader from "./reports/CompanyReportHeader";
 import ReportPrintButton from "./reports/ReportPrintButton";
@@ -16,6 +16,16 @@ import {
   Sliders, Settings, ChevronRight, Download, Filter, UserCheck, Layers, Award, ShieldCheck, Upload, ExternalLink
 } from "lucide-react";
 import { uploadFileToStorage } from "../firebase";
+import {
+  validateLeaveApplicationForm,
+  validateLeaveAdjustmentForm,
+  validateLeaveTypeForm,
+  validateLeaveYearForm,
+  validateDocumentUpload,
+  focusFirstInvalidField
+} from "../utils/validation";
+import { FormFieldError, ValidationSummary, fieldInputClass } from "./ui/FormFeedback";
+import { useToast, ConfirmDialog } from "./ui/ToastProvider";
 
 interface LeaveManagementProps {
   leaves: LeaveRecord[];
@@ -62,15 +72,19 @@ export default function LeaveManagement({
     return permissions.submenus[subId] !== false;
   };
 
+  const isEmployeeRole = currentUser?.role === "Employee";
   const isDeptHead = currentUser?.role === "Department Head";
+  const effectiveScope = isEmployeeRole ? "own" : (permissions?.dataScope || (isDeptHead ? "team" : "all"));
   const managedDeptIds = useMemo(
-    () => (isDeptHead ? getDepartmentHeadManagedDeptIds(currentUser, departments, employees) : []),
-    [isDeptHead, currentUser, departments, employees]
+    () => ((isDeptHead || effectiveScope === "team") ? getDepartmentHeadManagedDeptIds(currentUser, departments, employees) : []),
+    [isDeptHead, effectiveScope, currentUser, departments, employees]
   );
+  const ownEmp = useMemo(() => resolveOwnEmployeeRecord(currentUser, employees), [currentUser, employees]);
+  const myEmpId = ownEmp?.employeeId || currentUser?.employeeId;
 
   const isRecordInScope = (employeeId: string) => {
-    if (currentUser?.role === "Employee") return employeeId === currentUser?.employeeId;
-    if (isDeptHead && managedDeptIds.length > 0) {
+    if (effectiveScope === "own") return Boolean(myEmpId && employeeId === myEmpId);
+    if (effectiveScope === "team" && managedDeptIds.length > 0) {
       const emp = employees.find(e => e.employeeId === employeeId);
       return emp ? managedDeptIds.includes(emp.departmentId) : false;
     }
@@ -220,16 +234,46 @@ export default function LeaveManagement({
   const [leaveStatus, setLeaveStatus] = useState<any>("Active");
   const [adminBypass, setAdminBypass] = useState(false);
 
+  const toast = useToast();
   const [formError, setFormError] = useState("");
   const [formSuccess, setFormSuccess] = useState("");
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Confirm Dialog state for Cancel / Delete / Year-End Re-run
+  const [confirmState, setConfirmState] = useState<{
+    isOpen: boolean;
+    title: string;
+    message: React.ReactNode;
+    confirmText: string;
+    variant: "danger" | "warning" | "primary";
+    onConfirm: () => void;
+  } | null>(null);
+
+  const clearFieldError = (key: string) => {
+    setFieldErrors((prev) => {
+      if (!prev[key]) return prev;
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+  };
 
   const handleLeaveDocUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     setFormError("");
     setDocUploadStatus("");
-    if (file.size > 10 * 1024 * 1024) {
-      setFormError("Supporting document exceeds the 10MB size limit.");
+    const fileCheck = validateDocumentUpload(file, {
+      maxSizeMB: 10,
+      allowedExtensions: ["pdf", "png", "jpg", "jpeg", "webp", "doc", "docx"]
+    });
+    if (!fileCheck.valid) {
+      const msg = fileCheck.error || "Invalid supporting document file.";
+      setFormError(msg);
+      setFieldErrors((prev) => ({ ...prev, supportingDocumentUrl: msg }));
+      toast.showError(msg, "File Validation Error");
+      e.target.value = "";
       return;
     }
     setDocUploading(true);
@@ -237,9 +281,13 @@ export default function LeaveManagement({
       const targetEmp = empIdInput || currentUser?.employeeId || "general";
       const uploaded = await uploadFileToStorage(`leave_documents/${targetEmp}`, file);
       setDocUrl(uploaded.url);
+      clearFieldError("supportingDocumentUrl");
       setDocUploadStatus(`Uploaded '${file.name}' to Firebase Storage.`);
+      toast.showSuccess(`Uploaded '${file.name}' successfully.`, "Document Uploaded");
     } catch (err: any) {
-      setFormError(err?.message || "Failed to upload supporting document to Firebase Storage.");
+      const msg = err?.message || "Failed to upload supporting document to Firebase Storage.";
+      setFormError(msg);
+      toast.showError(msg, "Upload Failed");
     } finally {
       setDocUploading(false);
       e.target.value = "";
@@ -294,6 +342,7 @@ export default function LeaveManagement({
     setAdminBypass(false);
     setFormError("");
     setFormSuccess("");
+    setFieldErrors({});
   };
 
   const handleOpenAdd = () => {
@@ -312,59 +361,55 @@ export default function LeaveManagement({
     setReason(rec.reason);
     setRemarks(rec.remarks);
     setDocUrl(rec.supportingDocumentUrl || "");
+    setDocUploadStatus("");
     setLeaveStatus(rec.status);
     setAdminBypass(false);
     setFormError("");
     setFormSuccess("");
+    setFieldErrors({});
     setEditModalOpen(true);
   };
 
-  const handleAddSubmit = (e: React.FormEvent) => {
+  const handleAddSubmit = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
+    if (isSubmitting) return;
     setFormError("");
     setFormSuccess("");
 
-    if (!empIdInput || !leaveType || !startDate || !endDate) {
-      setFormError("All required fields must be completed.");
-      return;
-    }
-
-    const empObj = employees.find(e => e.employeeId === empIdInput);
-    if (!empObj || empObj.status !== "Active") {
-      setFormError("Selected employee is inactive or invalid.");
-      return;
-    }
-
-    const start = new Date(startDate);
-    const end = new Date(endDate);
-    if (start > end) {
-      setFormError("Start date cannot be after end date.");
-      return;
-    }
-
-    const isOverlapping = checkLeaveOverlap(empIdInput, startDate, endDate, leaves);
-    if (isOverlapping) {
-      setFormError("Date collision: Employee already has an overlapping active leave record during this period.");
-      return;
-    }
-
-    if (computedWorkingDays === 0) {
-      setFormError("Calculated leave duration is 0 working days based on company calendar.");
-      return;
-    }
-
-    // Check supporting document requirement
+    const empObj = employees.find(emp => emp.employeeId === empIdInput);
     const targetTypeObj = activeLeaveTypes.find(t => t.name === leaveType);
-    if (targetTypeObj?.requiresSupportingDocument && !docUrl.trim()) {
-      setFormError(`${leaveType} policy requires a supporting document link or reference before registration.`);
+
+    const validation = validateLeaveApplicationForm({
+      employeeId: empIdInput,
+      leaveType,
+      startDate,
+      endDate,
+      daysCount: computedWorkingDays,
+      reason,
+      supportingDocumentUrl: docUrl,
+      leaveTypeConfig: targetTypeObj,
+      remainingBalance: adminBypass ? undefined : currentSelectedBalance.remaining,
+      existingLeaves: leaves,
+      mode: "add"
+    });
+
+    if (!validation.valid) {
+      setFieldErrors(validation.errors);
+      setFormError(validation.summaryMessage || "Please correct the highlighted fields.");
+      focusFirstInvalidField(validation.errors, e.currentTarget);
       return;
     }
 
-    // Balance check
-    if (computedWorkingDays > currentSelectedBalance.remaining && !adminBypass) {
-      setFormError(`Insufficient leave balance! Requested ${computedWorkingDays} days exceeds remaining ${currentSelectedBalance.remaining} days.`);
+    if (!empObj || empObj.status !== "Active") {
+      const msg = "Selected employee is inactive or invalid.";
+      setFieldErrors({ employeeId: msg });
+      setFormError(msg);
+      focusFirstInvalidField({ employeeId: msg }, e.currentTarget);
       return;
     }
+
+    setFieldErrors({});
+    setIsSubmitting(true);
 
     const newRec: LeaveRecord = {
       id: `LVE_${Date.now()}`,
@@ -375,7 +420,7 @@ export default function LeaveManagement({
       daysCount: computedWorkingDays,
       isHalfDay,
       halfDayPeriod: isHalfDay ? halfDayPeriod : undefined,
-      reason,
+      reason: reason.trim(),
       status: "Active",
       remarks,
       supportingDocumentUrl: docUrl.trim() || undefined,
@@ -385,46 +430,70 @@ export default function LeaveManagement({
     };
 
     const ok = onAddLeave(newRec);
+    setIsSubmitting(false);
     if (ok) {
       setFormSuccess("Leave application registered successfully!");
+      toast.showSuccess(
+        `Registered ${newRec.daysCount} day(s) of ${newRec.leaveType} for ${empObj.fullName}.`,
+        "Leave Registered"
+      );
       onLogAction(
         "Leave",
         "Leave Created",
         newRec.employeeId,
         `Registered ${newRec.daysCount} days of ${newRec.leaveType} for ${empObj.fullName}`
       );
-      setTimeout(() => {
-        setAddModalOpen(false);
-        resetForm();
-      }, 1000);
+      setAddModalOpen(false);
+      resetForm();
     } else {
-      setFormError("Could not create leave record.");
+      setFormError("Could not create leave record due to permission or connection error.");
     }
   };
 
-  const handleEditSubmit = (e: React.FormEvent) => {
+  const handleEditSubmit = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
+    if (isSubmitting || !selectedLeave) return;
     setFormError("");
     setFormSuccess("");
 
-    if (!selectedLeave) return;
-
-    const empObj = employees.find(e => e.employeeId === empIdInput);
+    const empObj = employees.find(emp => emp.employeeId === empIdInput);
     if (!empObj) {
-      setFormError("Employee folder does not exist.");
+      const msg = "Employee folder does not exist.";
+      setFieldErrors({ employeeId: msg });
+      setFormError(msg);
       return;
     }
 
-    const isOverlapping = checkLeaveOverlap(empIdInput, startDate, endDate, leaves, selectedLeave.id);
-    if (isOverlapping) {
-      setFormError("Date collision: Employee already has an overlapping active leave record.");
+    const targetTypeObj = activeLeaveTypes.find(t => t.name === leaveType);
+    const effectiveRemaining =
+      selectedLeave.status !== "Cancelled" && selectedLeave.leaveType === leaveType
+        ? currentSelectedBalance.remaining + (selectedLeave.daysCount || 0)
+        : currentSelectedBalance.remaining;
+
+    const validation = validateLeaveApplicationForm({
+      recordId: selectedLeave.id,
+      employeeId: empIdInput,
+      leaveType,
+      startDate,
+      endDate,
+      daysCount: computedWorkingDays,
+      reason,
+      supportingDocumentUrl: docUrl,
+      leaveTypeConfig: targetTypeObj,
+      remainingBalance: leaveStatus === "Cancelled" || adminBypass ? undefined : effectiveRemaining,
+      existingLeaves: leaves,
+      mode: "edit"
+    });
+
+    if (!validation.valid) {
+      setFieldErrors(validation.errors);
+      setFormError(validation.summaryMessage || "Please correct the highlighted fields.");
+      focusFirstInvalidField(validation.errors, e.currentTarget);
       return;
     }
 
-    if (computedWorkingDays === 0) {
-      setFormError("Calculated leave duration is 0 working days.");
-      return;
-    }
+    setFieldErrors({});
+    setIsSubmitting(true);
 
     const updatedRec: LeaveRecord = {
       ...selectedLeave,
@@ -434,7 +503,7 @@ export default function LeaveManagement({
       daysCount: computedWorkingDays,
       isHalfDay,
       halfDayPeriod: isHalfDay ? halfDayPeriod : undefined,
-      reason,
+      reason: reason.trim(),
       status: leaveStatus,
       remarks,
       supportingDocumentUrl: docUrl.trim() || undefined,
@@ -442,34 +511,47 @@ export default function LeaveManagement({
     };
 
     onUpdateLeave(updatedRec);
+    setIsSubmitting(false);
     setFormSuccess("Leave record updated successfully!");
+    toast.showSuccess(`Leave record updated for ${empObj.fullName}.`, "Leave Updated");
     onLogAction(
       "Leave",
       "Leave Updated",
       updatedRec.employeeId,
       `Updated leave entry of ${leaveType} for ${empObj.fullName}`
     );
-    setTimeout(() => {
-      setEditModalOpen(false);
-    }, 1000);
+    setEditModalOpen(false);
   };
 
   const handleCancelLeave = (rec: LeaveRecord) => {
-    const confirmCheck = window.confirm(`Are you sure you want to cancel this leave application? Days will be restored to the employee's available balance.`);
-    if (confirmCheck) {
-      const updated = {
-        ...rec,
-        status: "Cancelled" as const,
-        updatedDate: new Date().toISOString().replace("T", " ").substring(0, 19)
-      };
-      onUpdateLeave(updated);
-      onLogAction(
-        "Leave",
-        "Leave Cancelled",
-        rec.employeeId,
-        `Cancelled leave record for employee ID ${rec.employeeId}`
-      );
-    }
+    setConfirmState({
+      isOpen: true,
+      title: "Cancel Leave Application",
+      message: (
+        <span>
+          Are you sure you want to cancel this <strong>{rec.leaveType}</strong> application ({rec.startDate} to {rec.endDate})?
+          The deducted days ({rec.daysCount}) will be restored to the employee&apos;s available balance.
+        </span>
+      ),
+      confirmText: "Yes, Cancel Leave",
+      variant: "warning",
+      onConfirm: () => {
+        const updated = {
+          ...rec,
+          status: "Cancelled" as const,
+          updatedDate: new Date().toISOString().replace("T", " ").substring(0, 19)
+        };
+        onUpdateLeave(updated);
+        onLogAction(
+          "Leave",
+          "Leave Cancelled",
+          rec.employeeId,
+          `Cancelled leave record for employee ID ${rec.employeeId}`
+        );
+        toast.showInfo(`Leave application cancelled and ${rec.daysCount} day(s) restored.`, "Leave Cancelled");
+        setConfirmState(null);
+      }
+    });
   };
 
   // ==========================================
@@ -478,31 +560,52 @@ export default function LeaveManagement({
   const [adjModalOpen, setAdjModalOpen] = useState(false);
   const [adjEmpId, setAdjEmpId] = useState("");
   const [adjLeaveType, setAdjLeaveType] = useState("Annual Leave");
-  const [adjAmount, setAdjAmount] = useState(0);
+  const [adjAmount, setAdjAmount] = useState<string>("0");
   const [adjReason, setAdjReason] = useState("");
+  const [adjErrors, setAdjErrors] = useState<Record<string, string>>({});
+
+  const clearAdjError = (key: string) => {
+    setAdjErrors((prev) => {
+      if (!prev[key]) return prev;
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+  };
 
   const handleOpenAdjustment = (empId?: string, typeName?: string) => {
     setAdjEmpId(empId || activeEmployees[0]?.employeeId || "");
     setAdjLeaveType(typeName || activeLeaveTypes[0]?.name || "Annual Leave");
-    setAdjAmount(0);
+    setAdjAmount("0");
     setAdjReason("");
+    setAdjErrors({});
     setAdjModalOpen(true);
   };
 
-  const handleSaveAdjustment = (e: React.FormEvent) => {
+  const handleSaveAdjustment = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    if (!adjEmpId || !adjLeaveType || adjAmount === 0 || !adjReason.trim()) {
-      alert("Please specify a valid non-zero adjustment amount and a mandatory reason.");
+    const matchedType = activeLeaveTypes.find(t => t.name === adjLeaveType);
+    const targetType = matchedType ? matchedType.id : "LT001";
+    const prevBalObj = computedBalances.find(b => b.employeeId === adjEmpId && b.leaveTypeName === adjLeaveType);
+    const prevRem = prevBalObj ? prevBalObj.remainingBalance : 0;
+
+    const validation = validateLeaveAdjustmentForm({
+      employeeId: adjEmpId,
+      leaveTypeId: adjLeaveType,
+      amount: String(adjAmount),
+      reason: adjReason,
+      currentRemaining: prevRem
+    });
+
+    if (!validation.valid) {
+      setAdjErrors(validation.errors);
+      focusFirstInvalidField(validation.errors, e.currentTarget);
       return;
     }
 
-    const matchedType = activeLeaveTypes.find(t => t.name === adjLeaveType);
-    const targetType = matchedType ? matchedType.id : "LT001";
+    const numericAmount = Number(adjAmount);
     const currentYear = leaveYearConfig.yearName || "2026";
-
-    const prevBalObj = computedBalances.find(b => b.employeeId === adjEmpId && b.leaveTypeName === adjLeaveType);
-    const prevRem = prevBalObj ? prevBalObj.remainingBalance : 0;
-    const newRem = Math.max(0, prevRem + adjAmount);
+    const newRem = Math.max(0, prevRem + numericAmount);
 
     const newAdj: LeaveBalanceAdjustment = {
       id: `ADJ_${Date.now()}`,
@@ -511,7 +614,7 @@ export default function LeaveManagement({
       leaveTypeName: adjLeaveType,
       leaveYear: currentYear,
       adjustmentType: "Manual Adjustment",
-      amount: adjAmount,
+      amount: numericAmount,
       previousRemaining: prevRem,
       newRemaining: newRem,
       reason: adjReason.trim(),
@@ -520,7 +623,11 @@ export default function LeaveManagement({
     };
 
     saveAdjustments([newAdj, ...manualAdjustments]);
-    onLogAction("Leave", "Balance Adjustment", adjEmpId, `Manual balance adjustment of ${adjAmount > 0 ? "+" : ""}${adjAmount} days for ${adjLeaveType}. Reason: ${adjReason}`);
+    onLogAction("Leave", "Balance Adjustment", adjEmpId, `Manual balance adjustment of ${numericAmount > 0 ? "+" : ""}${numericAmount} days for ${adjLeaveType}. Reason: ${adjReason}`);
+    toast.showSuccess(
+      `Adjusted ${adjLeaveType} balance by ${numericAmount > 0 ? "+" : ""}${numericAmount} day(s) for ${adjEmpId}.`,
+      "Balance Adjusted"
+    );
     setAdjModalOpen(false);
   };
 
@@ -541,8 +648,19 @@ export default function LeaveManagement({
   const [ltExpMonths, setLtExpMonths] = useState(12);
   const [ltRequiresDoc, setLtRequiresDoc] = useState(false);
   const [ltStatus, setLtStatus] = useState<"Active" | "Inactive">("Active");
+  const [ltErrors, setLtErrors] = useState<Record<string, string>>({});
+
+  const clearLtError = (key: string) => {
+    setLtErrors((prev) => {
+      if (!prev[key]) return prev;
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+  };
 
   const handleOpenTypeModal = (typeObj?: LeaveTypeConfig) => {
+    setLtErrors({});
     if (typeObj) {
       setEditingType(typeObj);
       setLtName(typeObj.name);
@@ -573,10 +691,24 @@ export default function LeaveManagement({
     setTypeModalOpen(true);
   };
 
-  const handleSaveTypeConfig = (e: React.FormEvent) => {
+  const handleSaveTypeConfig = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    if (!ltName.trim() || !ltCode.trim()) {
-      alert("Please provide both a Name and a Code for the Leave Type.");
+    const validation = validateLeaveTypeForm(
+      {
+        id: editingType?.id,
+        name: ltName,
+        code: ltCode,
+        annualEntitlement: Number(ltEntitlement),
+        maxCarryForwardDays: ltCarryEligible ? Number(ltMaxCarry) : 0,
+        expirationPeriodMonths: Number(ltExpMonths)
+      },
+      leaveTypesConfig,
+      editingType ? "edit" : "add"
+    );
+
+    if (!validation.valid) {
+      setLtErrors(validation.errors);
+      focusFirstInvalidField(validation.errors, e.currentTarget);
       return;
     }
 
@@ -630,6 +762,7 @@ export default function LeaveManagement({
 
     onUpdateConfig(updatedCompanyConfig);
     onLogAction("LeaveConfig", editingType ? "Update Leave Type" : "Create Leave Type", ltName, "Updated leave type rules and entitlements");
+    toast.showSuccess(`Leave policy "${ltName.trim()}" saved successfully.`, "Policy Updated");
     setTypeModalOpen(false);
   };
 
@@ -638,9 +771,33 @@ export default function LeaveManagement({
   const [lyStart, setLyStart] = useState(leaveYearConfig.startDate);
   const [lyEnd, setLyEnd] = useState(leaveYearConfig.endDate);
   const [lyWorkingDays, setLyWorkingDays] = useState<string[]>(leaveYearConfig.workingDays || ["Mon", "Tue", "Wed", "Thu", "Fri"]);
+  const [lyErrors, setLyErrors] = useState<Record<string, string>>({});
 
-  const handleSaveYearConfig = (e: React.FormEvent) => {
+  const clearLyError = (key: string) => {
+    setLyErrors((prev) => {
+      if (!prev[key]) return prev;
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+  };
+
+  const handleSaveYearConfig = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
+    const validation = validateLeaveYearForm({
+      yearName: lyYearName,
+      startDate: lyStart,
+      endDate: lyEnd,
+      workingDays: lyWorkingDays
+    });
+    if (!validation.valid) {
+      setLyErrors(validation.errors);
+      focusFirstInvalidField(validation.errors, e.currentTarget);
+      toast.showWarning(validation.summaryMessage || "Check leave year configuration.", "Validation Error");
+      return;
+    }
+    setLyErrors({});
+
     const updatedYearConfig: LeaveYearConfig = {
       ...leaveYearConfig,
       yearName: lyYearName.trim(),
@@ -654,7 +811,7 @@ export default function LeaveManagement({
       leaveYearConfig: updatedYearConfig
     });
     onLogAction("LeaveConfig", "Update Leave Year Policy", lyYearName, `Updated leave year schedule to ${lyStart} -> ${lyEnd} with working days ${lyWorkingDays.join(",")}`);
-    alert("Leave Year & Working Day configuration saved successfully!");
+    toast.showSuccess("Leave Year & Working Day configuration saved successfully!", "Schedule Policy Saved");
   };
 
   // Year End Carry Forward Execution Modal State
@@ -716,18 +873,11 @@ export default function LeaveManagement({
     };
   }, [activeEmployees, activeLeaveTypes, leaves, departments, yeFromYear]);
 
-  const handleExecuteYearEnd = () => {
-    // Check if transition already processed
-    const alreadyProcessed = yearEndRecords.some(r => r.fromYear === yeFromYear && r.toYear === yeToYear);
-    if (alreadyProcessed) {
-      const overwrite = window.confirm(`Year-end transition from ${yeFromYear} to ${yeToYear} was previously processed. Recalculate and update transition audit records?`);
-      if (!overwrite) return;
-    }
-
+  const commitYearEndTransition = () => {
     const newRecord: YearEndProcessingRecord = {
       id: `YE_${yeFromYear}_${yeToYear}_${Date.now()}`,
-      fromYear: yeFromYear,
-      toYear: yeToYear,
+      fromYear: yeFromYear.trim(),
+      toYear: yeToYear.trim(),
       processedDate: new Date().toISOString().replace("T", " ").substring(0, 19),
       processedBy: currentUser?.email || "contactesfaye@gmail.com",
       totalEmployeesProcessed: activeEmployees.length,
@@ -744,7 +894,7 @@ export default function LeaveManagement({
       ...companyConfig,
       leaveYearConfig: {
         ...leaveYearConfig,
-        yearName: yeToYear,
+        yearName: yeToYear.trim(),
         processedYearEnd: true,
         processedDate: new Date().toISOString().replace("T", " ").substring(0, 19),
         processedBy: currentUser?.email || "contactesfaye@gmail.com"
@@ -752,8 +902,41 @@ export default function LeaveManagement({
     });
 
     onLogAction("YearEndProcessing", "Year End Transition", `${yeFromYear}->${yeToYear}`, `Processed year-end carry forward: ${yearEndPreview.totalCarried} days carried forward, ${yearEndPreview.totalExpired} days expired across ${activeEmployees.length} employees`);
-    alert(`Year-end carry forward processing completed successfully! Transferred ${yearEndPreview.totalCarried} eligible days into ${yeToYear} balances.`);
+    toast.showSuccess(
+      `Transferred ${yearEndPreview.totalCarried} eligible days into ${yeToYear} balances.`,
+      "Year-End Processing Completed"
+    );
     setYearEndModalOpen(false);
+  };
+
+  const handleExecuteYearEnd = () => {
+    if (!yeFromYear.trim() || !yeToYear.trim() || yeFromYear.trim() === yeToYear.trim()) {
+      toast.showError("Please specify distinct Previous and New leave year labels.", "Invalid Leave Years");
+      return;
+    }
+    // Check if transition already processed
+    const alreadyProcessed = yearEndRecords.some(r => r.fromYear === yeFromYear && r.toYear === yeToYear);
+    if (alreadyProcessed) {
+      setConfirmState({
+        isOpen: true,
+        title: "Recalculate Year-End Transition",
+        message: (
+          <span>
+            Year-end transition from <strong>{yeFromYear}</strong> to <strong>{yeToYear}</strong> was previously processed.
+            Recalculate and update transition audit records?
+          </span>
+        ),
+        confirmText: "Yes, Recalculate",
+        variant: "warning",
+        onConfirm: () => {
+          commitYearEndTransition();
+          setConfirmState(null);
+        }
+      });
+      return;
+    }
+
+    commitYearEndTransition();
   };
 
   // ==========================================
@@ -1474,9 +1657,25 @@ export default function LeaveManagement({
                                 {canDelete && (
                                   <button
                                     onClick={() => {
-                                      if (window.confirm(`Are you sure you want to delete this leave application for employee ${l.employeeId}?`)) {
-                                        onDeleteLeave && onDeleteLeave(l.id);
-                                      }
+                                      setConfirmState({
+                                        isOpen: true,
+                                        title: "Delete Leave Record",
+                                        message: (
+                                          <span>
+                                            Permanently delete this <strong>{l.leaveType}</strong> application for employee{" "}
+                                            <strong>{l.employeeId}</strong> ({l.startDate} to {l.endDate})?
+                                          </span>
+                                        ),
+                                        confirmText: "Delete Record",
+                                        variant: "danger",
+                                        onConfirm: () => {
+                                          const ok = onDeleteLeave ? onDeleteLeave(l.id) : false;
+                                          if (ok) {
+                                            toast.showSuccess("Leave record deleted.", "Record Deleted");
+                                          }
+                                          setConfirmState(null);
+                                        }
+                                      });
                                     }}
                                     className="p-1 text-slate-400 hover:text-rose-700 hover:bg-rose-50 rounded"
                                     title="Delete Record"
@@ -1801,43 +2000,58 @@ export default function LeaveManagement({
             <h3 className="text-xs font-extrabold text-slate-800 uppercase tracking-wider flex items-center gap-2">
               <Calendar className="h-4 w-4 text-sky-600" /> Leave Year & Working Day Schedule Policy
             </h3>
-            <form onSubmit={handleSaveYearConfig} className="grid grid-cols-1 md:grid-cols-3 gap-4 items-end">
+            <form noValidate onSubmit={handleSaveYearConfig} className="grid grid-cols-1 md:grid-cols-3 gap-4 items-start">
+              <div className="md:col-span-3">
+                <ValidationSummary errors={lyErrors} />
+              </div>
               <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">Leave Year Name</label>
+                <label className="block text-xs font-bold text-slate-700 mb-1">Leave Year Name *</label>
                 <input
                   type="text"
+                  data-field="lyName"
                   value={lyYearName}
-                  onChange={(e) => setLyYearName(e.target.value)}
+                  onChange={(e) => {
+                    setLyYearName(e.target.value);
+                    clearLyError("lyName");
+                  }}
                   readOnly={!canEdit}
-                  className="w-full px-3 py-1.5 border rounded-lg text-xs font-bold read-only:bg-slate-50"
-                  required
+                  className={fieldInputClass(!!lyErrors.lyName, "w-full px-3 py-1.5 border rounded-lg text-xs font-bold read-only:bg-slate-50")}
                 />
+                <FormFieldError error={lyErrors.lyName} />
               </div>
               <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">Start Date</label>
+                <label className="block text-xs font-bold text-slate-700 mb-1">Start Date *</label>
                 <input
                   type="date"
+                  data-field="lyStart"
                   value={lyStart}
-                  onChange={(e) => setLyStart(e.target.value)}
+                  onChange={(e) => {
+                    setLyStart(e.target.value);
+                    clearLyError("lyStart");
+                  }}
                   readOnly={!canEdit}
-                  className="w-full px-3 py-1.5 border rounded-lg text-xs font-bold read-only:bg-slate-50"
-                  required
+                  className={fieldInputClass(!!lyErrors.lyStart, "w-full px-3 py-1.5 border rounded-lg text-xs font-bold read-only:bg-slate-50")}
                 />
+                <FormFieldError error={lyErrors.lyStart} />
               </div>
               <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">End Date</label>
+                <label className="block text-xs font-bold text-slate-700 mb-1">End Date *</label>
                 <input
                   type="date"
+                  data-field="lyEnd"
                   value={lyEnd}
-                  onChange={(e) => setLyEnd(e.target.value)}
+                  onChange={(e) => {
+                    setLyEnd(e.target.value);
+                    clearLyError("lyEnd");
+                  }}
                   readOnly={!canEdit}
-                  className="w-full px-3 py-1.5 border rounded-lg text-xs font-bold read-only:bg-slate-50"
-                  required
+                  className={fieldInputClass(!!lyErrors.lyEnd, "w-full px-3 py-1.5 border rounded-lg text-xs font-bold read-only:bg-slate-50")}
                 />
+                <FormFieldError error={lyErrors.lyEnd} />
               </div>
 
-              <div className="md:col-span-3 space-y-1 pt-2">
-                <label className="block text-xs font-bold text-slate-700">Company Working Days</label>
+              <div className="md:col-span-3 space-y-1 pt-2" data-field="lyWorkingDays">
+                <label className="block text-xs font-bold text-slate-700">Company Working Days *</label>
                 <div className="flex flex-wrap gap-2">
                   {["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map(day => (
                     <label key={day} className="flex items-center gap-1.5 px-3 py-1 border rounded-lg text-xs font-bold bg-slate-50 cursor-pointer">
@@ -1846,6 +2060,7 @@ export default function LeaveManagement({
                         checked={lyWorkingDays.includes(day)}
                         disabled={!canEdit}
                         onChange={(e) => {
+                          clearLyError("lyWorkingDays");
                           if (e.target.checked) {
                             setLyWorkingDays([...lyWorkingDays, day]);
                           } else {
@@ -1857,6 +2072,7 @@ export default function LeaveManagement({
                     </label>
                   ))}
                 </div>
+                <FormFieldError error={lyErrors.lyWorkingDays} />
               </div>
 
               <div className="md:col-span-3 flex justify-end">
@@ -2122,33 +2338,44 @@ export default function LeaveManagement({
               </button>
             </div>
 
-            <form onSubmit={handleSaveAdjustment} className="p-5 space-y-4">
+            <form noValidate onSubmit={handleSaveAdjustment} className="p-5 space-y-4">
+              <ValidationSummary errors={adjErrors} />
+
               <div className="space-y-1">
                 <label className="block text-xs font-bold text-slate-700">Select Employee *</label>
                 <select
+                  data-field="adjEmployeeId"
                   value={adjEmpId}
-                  onChange={(e) => setAdjEmpId(e.target.value)}
-                  className="w-full px-3 py-2 border rounded-lg text-xs font-bold bg-white"
-                  required
+                  onChange={(e) => {
+                    setAdjEmpId(e.target.value);
+                    clearAdjError("adjEmployeeId");
+                  }}
+                  className={fieldInputClass(!!adjErrors.adjEmployeeId, "w-full px-3 py-2 border rounded-lg text-xs font-bold bg-white")}
                 >
+                  <option value="">-- Select Employee --</option>
                   {activeEmployees.map(e => (
                     <option key={e.employeeId} value={e.employeeId}>{e.fullName} ({e.employeeId})</option>
                   ))}
                 </select>
+                <FormFieldError error={adjErrors.adjEmployeeId} />
               </div>
 
               <div className="space-y-1">
                 <label className="block text-xs font-bold text-slate-700">Leave Type *</label>
                 <select
+                  data-field="adjLeaveTypeId"
                   value={adjLeaveType}
-                  onChange={(e) => setAdjLeaveType(e.target.value)}
-                  className="w-full px-3 py-2 border rounded-lg text-xs font-bold bg-white"
-                  required
+                  onChange={(e) => {
+                    setAdjLeaveType(e.target.value);
+                    clearAdjError("adjLeaveTypeId");
+                  }}
+                  className={fieldInputClass(!!adjErrors.adjLeaveTypeId, "w-full px-3 py-2 border rounded-lg text-xs font-bold bg-white")}
                 >
                   {activeLeaveTypes.map(t => (
                     <option key={t.id} value={t.name}>{t.name}</option>
                   ))}
                 </select>
+                <FormFieldError error={adjErrors.adjLeaveTypeId} />
               </div>
 
               <div className="space-y-1">
@@ -2156,11 +2383,15 @@ export default function LeaveManagement({
                 <input
                   type="number"
                   step="0.5"
+                  data-field="adjAmount"
                   value={adjAmount}
-                  onChange={(e) => setAdjAmount(parseFloat(e.target.value) || 0)}
-                  className="w-full px-3 py-2 border rounded-lg text-xs font-bold"
-                  required
+                  onChange={(e) => {
+                    setAdjAmount(e.target.value);
+                    clearAdjError("adjAmount");
+                  }}
+                  className={fieldInputClass(!!adjErrors.adjAmount, "w-full px-3 py-2 border rounded-lg text-xs font-bold")}
                 />
+                <FormFieldError error={adjErrors.adjAmount} />
                 <span className="text-[10px] text-slate-400 block font-medium">Use positive numbers to add days, or negative numbers to deduct.</span>
               </div>
 
@@ -2168,12 +2399,16 @@ export default function LeaveManagement({
                 <label className="block text-xs font-bold text-slate-700">Mandatory Justification / Reason *</label>
                 <textarea
                   rows={2}
+                  data-field="adjReason"
                   value={adjReason}
-                  onChange={(e) => setAdjReason(e.target.value)}
+                  onChange={(e) => {
+                    setAdjReason(e.target.value);
+                    clearAdjError("adjReason");
+                  }}
                   placeholder="Mandatory reason for balance adjustment..."
-                  className="w-full px-3 py-2 border rounded-lg text-xs"
-                  required
+                  className={fieldInputClass(!!adjErrors.adjReason, "w-full px-3 py-2 border rounded-lg text-xs")}
                 />
+                <FormFieldError error={adjErrors.adjReason} />
               </div>
 
               <div className="flex justify-end gap-2 pt-3 border-t">
@@ -2299,27 +2534,37 @@ export default function LeaveManagement({
               </button>
             </div>
 
-            <form onSubmit={handleSaveTypeConfig} className="p-5 space-y-4">
+            <form noValidate onSubmit={handleSaveTypeConfig} className="p-5 space-y-4">
+              <ValidationSummary errors={ltErrors} />
+
               <div className="grid grid-cols-2 gap-3">
                 <div className="space-y-1">
                   <label className="block text-xs font-bold text-slate-700">Policy Name *</label>
                   <input
                     type="text"
+                    data-field="ltName"
                     value={ltName}
-                    onChange={(e) => setLtName(e.target.value)}
-                    className="w-full px-3 py-1.5 border rounded-lg text-xs font-bold"
-                    required
+                    onChange={(e) => {
+                      setLtName(e.target.value);
+                      clearLtError("ltName");
+                    }}
+                    className={fieldInputClass(!!ltErrors.ltName, "w-full px-3 py-1.5 border rounded-lg text-xs font-bold")}
                   />
+                  <FormFieldError error={ltErrors.ltName} />
                 </div>
                 <div className="space-y-1">
                   <label className="block text-xs font-bold text-slate-700">Code *</label>
                   <input
                     type="text"
+                    data-field="ltCode"
                     value={ltCode}
-                    onChange={(e) => setLtCode(e.target.value)}
-                    className="w-full px-3 py-1.5 border rounded-lg text-xs font-bold"
-                    required
+                    onChange={(e) => {
+                      setLtCode(e.target.value);
+                      clearLtError("ltCode");
+                    }}
+                    className={fieldInputClass(!!ltErrors.ltCode, "w-full px-3 py-1.5 border rounded-lg text-xs font-bold uppercase")}
                   />
+                  <FormFieldError error={ltErrors.ltCode} />
                 </div>
               </div>
 
@@ -2328,11 +2573,15 @@ export default function LeaveManagement({
                   <label className="block text-xs font-bold text-slate-700">Annual Entitlement (Days) *</label>
                   <input
                     type="number"
+                    data-field="ltEntitlement"
                     value={ltEntitlement}
-                    onChange={(e) => setLtEntitlement(Number(e.target.value))}
-                    className="w-full px-3 py-1.5 border rounded-lg text-xs font-bold"
-                    required
+                    onChange={(e) => {
+                      setLtEntitlement(Number(e.target.value));
+                      clearLtError("ltEntitlement");
+                    }}
+                    className={fieldInputClass(!!ltErrors.ltEntitlement, "w-full px-3 py-1.5 border rounded-lg text-xs font-bold")}
                   />
+                  <FormFieldError error={ltErrors.ltEntitlement} />
                 </div>
                 <div className="space-y-1">
                   <label className="block text-xs font-bold text-slate-700">Paid Status</label>
@@ -2379,23 +2628,33 @@ export default function LeaveManagement({
                     <label className="block text-xs font-bold text-slate-700">Max Carry Forward Days</label>
                     <input
                       type="number"
+                      data-field="ltMaxCarry"
                       value={ltMaxCarry}
-                      onChange={(e) => setLtMaxCarry(Number(e.target.value))}
-                      className="w-full px-3 py-1.5 border rounded-lg text-xs font-bold"
+                      onChange={(e) => {
+                        setLtMaxCarry(Number(e.target.value));
+                        clearLtError("ltMaxCarry");
+                      }}
+                      className={fieldInputClass(!!ltErrors.ltMaxCarry, "w-full px-3 py-1.5 border rounded-lg text-xs font-bold")}
                     />
+                    <FormFieldError error={ltErrors.ltMaxCarry} />
                   </div>
                   <div className="space-y-1">
                     <label className="block text-xs font-bold text-slate-700">Expiration Period (Months)</label>
                     <select
+                      data-field="ltExpireMonths"
                       value={ltExpMonths}
-                      onChange={(e) => setLtExpMonths(Number(e.target.value))}
-                      className="w-full px-3 py-1.5 border rounded-lg text-xs font-bold bg-white"
+                      onChange={(e) => {
+                        setLtExpMonths(Number(e.target.value));
+                        clearLtError("ltExpireMonths");
+                      }}
+                      className={fieldInputClass(!!ltErrors.ltExpireMonths, "w-full px-3 py-1.5 border rounded-lg text-xs font-bold bg-white")}
                     >
                       <option value={6}>6 Months</option>
                       <option value={12}>12 Months (1 Year)</option>
                       <option value={24}>24 Months (2 Years)</option>
                       <option value={0}>Never Expire</option>
                     </select>
+                    <FormFieldError error={ltErrors.ltExpireMonths} />
                   </div>
                 </div>
               )}
@@ -2453,12 +2712,8 @@ export default function LeaveManagement({
               </button>
             </div>
 
-            <form onSubmit={editModalOpen ? handleEditSubmit : handleAddSubmit} className="p-5 space-y-4 max-h-[80vh] overflow-y-auto">
-              {formError && (
-                <div className="p-3 bg-rose-50 text-rose-800 border border-rose-200 rounded-lg text-xs font-semibold">
-                  {formError}
-                </div>
-              )}
+            <form noValidate onSubmit={editModalOpen ? handleEditSubmit : handleAddSubmit} className="p-5 space-y-4 max-h-[80vh] overflow-y-auto">
+              <ValidationSummary errors={fieldErrors} message={formError} />
               {formSuccess && (
                 <div className="p-3 bg-emerald-50 text-emerald-800 border border-emerald-200 rounded-lg text-xs font-semibold">
                   {formSuccess}
@@ -2469,32 +2724,44 @@ export default function LeaveManagement({
                 <div className="space-y-1">
                   <label className="block text-xs font-bold text-slate-700">Employee *</label>
                   <select
+                    data-field="employeeId"
                     value={empIdInput}
-                    onChange={(e) => setEmpIdInput(e.target.value)}
+                    onChange={(e) => {
+                      setEmpIdInput(e.target.value);
+                      clearFieldError("employeeId");
+                    }}
                     disabled={editModalOpen}
-                    className="w-full px-3 py-1.5 border rounded-lg text-xs font-bold bg-white disabled:bg-slate-50"
-                    required
+                    className={fieldInputClass(!!fieldErrors.employeeId, "w-full px-3 py-1.5 border rounded-lg text-xs font-bold bg-white disabled:bg-slate-50")}
                   >
+                    <option value="">-- Select Employee --</option>
                     {activeEmployees.map(emp => (
                       <option key={emp.employeeId} value={emp.employeeId}>
                         {emp.fullName} ({emp.employeeId})
                       </option>
                     ))}
                   </select>
+                  <FormFieldError error={fieldErrors.employeeId} />
                 </div>
 
                 <div className="space-y-1">
                   <label className="block text-xs font-bold text-slate-700">Leave Type *</label>
                   <select
+                    data-field="leaveType"
                     value={leaveType}
-                    onChange={(e) => setLeaveType(e.target.value)}
-                    className="w-full px-3 py-1.5 border rounded-lg text-xs font-bold bg-white"
-                    required
+                    onChange={(e) => {
+                      setLeaveType(e.target.value);
+                      clearFieldError("leaveType");
+                      clearFieldError("daysCount");
+                      clearFieldError("supportingDocumentUrl");
+                    }}
+                    className={fieldInputClass(!!fieldErrors.leaveType, "w-full px-3 py-1.5 border rounded-lg text-xs font-bold bg-white")}
                   >
+                    <option value="">-- Select Leave Type --</option>
                     {activeLeaveTypes.map(lt => (
                       <option key={lt.id} value={lt.name}>{lt.name}</option>
                     ))}
                   </select>
+                  <FormFieldError error={fieldErrors.leaveType} />
                 </div>
               </div>
 
@@ -2503,30 +2770,50 @@ export default function LeaveManagement({
                   <label className="block text-xs font-bold text-slate-700">Start Date *</label>
                   <input
                     type="date"
+                    data-field="startDate"
                     value={startDate}
-                    onChange={(e) => setStartDate(e.target.value)}
-                    className="w-full px-3 py-1.5 border rounded-lg text-xs font-bold"
-                    required
+                    onChange={(e) => {
+                      setStartDate(e.target.value);
+                      clearFieldError("startDate");
+                      clearFieldError("endDate");
+                      clearFieldError("daysCount");
+                    }}
+                    className={fieldInputClass(!!fieldErrors.startDate, "w-full px-3 py-1.5 border rounded-lg text-xs font-bold")}
                   />
+                  <FormFieldError error={fieldErrors.startDate} />
                 </div>
                 <div className="space-y-1">
                   <label className="block text-xs font-bold text-slate-700">End Date *</label>
                   <input
                     type="date"
+                    data-field="endDate"
                     value={endDate}
-                    onChange={(e) => setEndDate(e.target.value)}
-                    className="w-full px-3 py-1.5 border rounded-lg text-xs font-bold"
-                    required
+                    onChange={(e) => {
+                      setEndDate(e.target.value);
+                      clearFieldError("endDate");
+                      clearFieldError("startDate");
+                      clearFieldError("daysCount");
+                    }}
+                    className={fieldInputClass(!!fieldErrors.endDate, "w-full px-3 py-1.5 border rounded-lg text-xs font-bold")}
                   />
+                  <FormFieldError error={fieldErrors.endDate} />
                 </div>
               </div>
 
-              <div className="flex flex-wrap items-center justify-between gap-3 bg-slate-50 border rounded-lg p-3 text-xs">
+              <div
+                data-field="daysCount"
+                className={`flex flex-wrap items-center justify-between gap-3 border rounded-lg p-3 text-xs ${
+                  fieldErrors.daysCount ? "bg-rose-50/50 border-rose-400" : "bg-slate-50"
+                }`}
+              >
                 <label className="flex items-center gap-2 font-bold text-slate-700 cursor-pointer">
                   <input
                     type="checkbox"
                     checked={isHalfDay}
-                    onChange={(e) => setIsHalfDay(e.target.checked)}
+                    onChange={(e) => {
+                      setIsHalfDay(e.target.checked);
+                      clearFieldError("daysCount");
+                    }}
                   />
                   <span>Half-Day Leave</span>
                 </label>
@@ -2547,16 +2834,22 @@ export default function LeaveManagement({
                   </span>
                 </div>
               </div>
+              <FormFieldError error={fieldErrors.daysCount} />
 
               <div className="space-y-1">
-                <label className="block text-xs font-bold text-slate-700">Reason</label>
+                <label className="block text-xs font-bold text-slate-700">Reason *</label>
                 <textarea
                   rows={2}
+                  data-field="reason"
                   value={reason}
-                  onChange={(e) => setReason(e.target.value)}
+                  onChange={(e) => {
+                    setReason(e.target.value);
+                    clearFieldError("reason");
+                  }}
                   placeholder="Enter reason for leave request..."
-                  className="w-full px-3 py-1.5 border rounded-lg text-xs"
+                  className={fieldInputClass(!!fieldErrors.reason, "w-full px-3 py-1.5 border rounded-lg text-xs")}
                 />
+                <FormFieldError error={fieldErrors.reason} />
               </div>
 
               <div className="space-y-1.5">
@@ -2564,10 +2857,14 @@ export default function LeaveManagement({
                 <div className="flex flex-col sm:flex-row gap-2">
                   <input
                     type="url"
+                    data-field="supportingDocumentUrl"
                     value={docUrl}
-                    onChange={(e) => setDocUrl(e.target.value)}
+                    onChange={(e) => {
+                      setDocUrl(e.target.value);
+                      clearFieldError("supportingDocumentUrl");
+                    }}
                     placeholder="https://... or upload supporting file to Firebase Storage"
-                    className="flex-1 px-3 py-1.5 border rounded-lg text-xs"
+                    className={fieldInputClass(!!fieldErrors.supportingDocumentUrl, "flex-1 px-3 py-1.5 border rounded-lg text-xs")}
                   />
                   <label className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 border border-slate-300 text-slate-700 text-xs font-bold rounded-lg cursor-pointer inline-flex items-center justify-center gap-1.5 shrink-0">
                     {docUploading ? (
@@ -2585,6 +2882,7 @@ export default function LeaveManagement({
                     />
                   </label>
                 </div>
+                <FormFieldError error={fieldErrors.supportingDocumentUrl} />
                 {docUploadStatus && (
                   <p className="text-[11px] font-semibold text-emerald-700">{docUploadStatus}</p>
                 )}
@@ -2605,12 +2903,15 @@ export default function LeaveManagement({
                 </div>
               )}
 
-              {!editModalOpen && computedWorkingDays > currentSelectedBalance.remaining && canApprove && (
+              {computedWorkingDays > currentSelectedBalance.remaining && canApprove && (
                 <label className="flex items-center gap-2 p-2.5 bg-amber-50 border border-amber-200 rounded-lg text-xs font-bold text-amber-900 cursor-pointer">
                   <input
                     type="checkbox"
                     checked={adminBypass}
-                    onChange={(e) => setAdminBypass(e.target.checked)}
+                    onChange={(e) => {
+                      setAdminBypass(e.target.checked);
+                      clearFieldError("daysCount");
+                    }}
                   />
                   <span>Admin Override: Allow leave exceeding available balance</span>
                 </label>
@@ -2629,14 +2930,28 @@ export default function LeaveManagement({
                 </button>
                 <button
                   type="submit"
-                  className="px-3.5 py-1.5 text-xs font-extrabold text-white bg-primary-custom hover:opacity-95 rounded-lg flex items-center gap-1"
+                  disabled={isSubmitting || docUploading}
+                  className="px-3.5 py-1.5 text-xs font-extrabold text-white bg-primary-custom hover:opacity-95 rounded-lg flex items-center gap-1 disabled:opacity-50"
                 >
-                  <Save className="h-4 w-4 text-accent-custom" /> {editModalOpen ? "Update Leave" : "Submit Leave"}
+                  <Save className="h-4 w-4 text-accent-custom" />
+                  <span>{isSubmitting ? "Saving..." : editModalOpen ? "Update Leave" : "Submit Leave"}</span>
                 </button>
               </div>
             </form>
           </div>
         </div>
+      )}
+
+      {confirmState && (
+        <ConfirmDialog
+          isOpen={confirmState.isOpen}
+          title={confirmState.title}
+          message={confirmState.message}
+          confirmText={confirmState.confirmText}
+          variant={confirmState.variant}
+          onConfirm={confirmState.onConfirm}
+          onCancel={() => setConfirmState(null)}
+        />
       )}
     </div>
   );

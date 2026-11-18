@@ -1,4 +1,4 @@
-import { CompanyConfig, EmailActivityLog, EmailTemplate } from "../types";
+import { CompanyConfig, EmailActivityLog } from "../types";
 
 export interface DispatchEmailParams {
   recipientEmail: string;
@@ -148,7 +148,7 @@ export async function dispatchHrmsEmail(params: DispatchEmailParams): Promise<{ 
     </div>
   `;
 
-  // Attempt Backend Dispatch via /api/email/send
+  // Dispatch via Backend Express /api/email/send endpoint
   try {
     const res = await fetch("/api/email/send", {
       method: "POST",
@@ -162,9 +162,9 @@ export async function dispatchHrmsEmail(params: DispatchEmailParams): Promise<{ 
       })
     });
 
-    const data = await res.json() as { success: boolean; status?: string; message?: string; error?: string };
+    const data = await res.json();
 
-    if (data.success && data.status === "Sent") {
+    if (res.ok && data.success && data.status === "Sent") {
       const sentLog: EmailActivityLog = {
         id: `LOG_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
         recipientEmployeeId,
@@ -178,11 +178,15 @@ export async function dispatchHrmsEmail(params: DispatchEmailParams): Promise<{ 
         retryCount: 0,
         triggeredBy
       };
+
       onUpdateEmailLogs([sentLog, ...emailLogs]);
-      return { success: true, message: "Email sent successfully via M365 Exchange Online SMTP XOAUTH2.", logItem: sentLog };
+      return {
+        success: true,
+        message: "Email sent successfully via M365 Exchange Online SMTP XOAUTH2.",
+        logItem: sentLog
+      };
     } else {
-      // Pending Entra ID configuration or SMTP failure
-      const failureReason = data.message || data.error || "Microsoft 365 Entra ID setup pending.";
+      const failureReason = data.message || data.error || "Email service pending or unavailable.";
       const failedLog: EmailActivityLog = {
         id: `LOG_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
         recipientEmployeeId,
@@ -197,8 +201,13 @@ export async function dispatchHrmsEmail(params: DispatchEmailParams): Promise<{ 
         retryCount: 0,
         triggeredBy
       };
+
       onUpdateEmailLogs([failedLog, ...emailLogs]);
-      return { success: false, message: `Email delivery queued/failed: ${failureReason}`, logItem: failedLog };
+      return {
+        success: false,
+        message: `Email logged as Failed: ${failureReason}`,
+        logItem: failedLog
+      };
     }
   } catch (netErr: any) {
     const failedLog: EmailActivityLog = {
@@ -210,12 +219,17 @@ export async function dispatchHrmsEmail(params: DispatchEmailParams): Promise<{ 
       sendingModule: category,
       dateTime: new Date().toISOString().replace("T", " ").substring(0, 19),
       deliveryStatus: "Failed",
-      failureReason: netErr?.message || "Network connection to M365 Email Service failed.",
+      failureReason: netErr.message || "Network connection to M365 Email Service failed.",
       relatedRecordId,
       retryCount: 0,
       triggeredBy
     };
+
     onUpdateEmailLogs([failedLog, ...emailLogs]);
-    return { success: false, message: `Email delivery failed: ${netErr?.message || 'Network error'}`, logItem: failedLog };
+    return {
+      success: false,
+      message: `Email logged as Failed: ${netErr.message}`,
+      logItem: failedLog
+    };
   }
 }

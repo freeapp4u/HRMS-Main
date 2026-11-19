@@ -3,11 +3,11 @@ import react from '@vitejs/plugin-react';
 import path from 'path';
 import { defineConfig } from 'vite';
 
-export default defineConfig(() => {
+export default defineConfig(({ command }) => {
   const disableHmr = process.env.DISABLE_HMR === 'true';
 
   return {
-    base: '/HRMS-Main/',
+    base: command === 'build' ? '/HRMS-Main/' : '/',
     plugins: [react(), tailwindcss()],
 
     resolve: {

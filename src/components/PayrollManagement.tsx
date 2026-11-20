@@ -25,7 +25,6 @@ import ReportPDFExportButton from "./reports/ReportPDFExportButton";
 import {
   formatReportDateTime,
   getCompanyLogoUrl,
-  getDefaultEmblemDataUri,
   ReportExportPayload
 } from "../utils/reportBranding";
 import { printStructuredReport } from "../utils/reportPrint";
@@ -3875,7 +3874,7 @@ export default function PayrollManagement({
               <div className="border-b-2 border-primary-custom pb-4 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
                 <div className="flex items-center gap-3">
                   <img
-                    src={getCompanyLogoUrl(companyConfig || undefined) || getDefaultEmblemDataUri()}
+                    src={getCompanyLogoUrl(companyConfig || undefined)}
                     alt="Ethiopian Reinsurance S.C. Official Logo"
                     className="h-12 w-auto max-w-[120px] object-contain shrink-0"
                     referrerPolicy="no-referrer"

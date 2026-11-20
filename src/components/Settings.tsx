@@ -10,7 +10,7 @@ import { resolveUserPermissions } from "../utils/rbacUtils";
 import { uploadFileToStorage, deleteFileFromStorage } from "../firebase";
 import ReportPrintButton from "./reports/ReportPrintButton";
 import ReportPDFExportButton from "./reports/ReportPDFExportButton";
-import { formatReportDateTime, ReportExportPayload } from "../utils/reportBranding";
+import { formatReportDateTime, getOfficialLogoUrl, ReportExportPayload } from "../utils/reportBranding";
 import {
   validateCompanyProfileForm,
   validateHolidayForm,
@@ -310,7 +310,7 @@ export default function Settings({
         logoUrl: ""
       }
     });
-    toast.showInfo("Custom company logo removed. Default emblem restored.", "Logo Removed");
+    toast.showInfo("Custom company logo removed. Official Ethiopian Reinsurance S.C. logo restored.", "Default Logo Restored");
   };
 
   // Add Public Holiday
@@ -740,15 +740,25 @@ export default function Settings({
 
             {/* Logo Section */}
             <div className="p-4 bg-slate-50 rounded-lg border border-slate-100 flex flex-col sm:flex-row items-center gap-5">
-              <div className="h-20 w-20 border border-slate-200 bg-white rounded-lg flex items-center justify-center p-2 shrink-0">
-                {logoUrl ? (
-                  <img src={logoUrl} alt="Branding Logo" className="max-h-full max-w-full object-contain" referrerPolicy="no-referrer" />
-                ) : (
-                  <span className="text-xs font-extrabold text-slate-400 uppercase">No Logo</span>
-                )}
+              <div className="h-24 w-24 border border-slate-200 bg-white rounded-lg flex items-center justify-center p-1.5 shrink-0">
+                <img
+                  src={logoUrl || getOfficialLogoUrl()}
+                  alt="Ethiopian Reinsurance S.C. Official Logo"
+                  className="max-h-full max-w-full object-contain rounded"
+                  referrerPolicy="no-referrer"
+                />
               </div>
               <div className="space-y-2 flex-1 text-center sm:text-left w-full">
-                <h4 className="font-bold text-xs text-slate-700">Ethio-Re Company Logo</h4>
+                <div className="flex flex-wrap items-center justify-center sm:justify-start gap-2">
+                  <h4 className="font-bold text-xs text-slate-700">Ethio-Re Company Logo</h4>
+                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                    logoUrl
+                      ? "bg-blue-50 text-blue-700 border border-blue-200"
+                      : "bg-emerald-50 text-emerald-700 border border-emerald-200"
+                  }`}>
+                    {logoUrl ? "Custom Uploaded Logo" : "Official Bundled Default"}
+                  </span>
+                </div>
                 {canEdit && (
                   <div className="flex flex-col sm:flex-row gap-2">
                     <label className="px-3.5 py-1.5 bg-white border hover:bg-slate-50 text-slate-700 text-xs font-bold rounded-lg cursor-pointer inline-flex items-center justify-center gap-1.5 shadow-2xs">
@@ -757,7 +767,7 @@ export default function Settings({
                       ) : (
                         <Upload className="h-3.5 w-3.5 text-primary-custom" />
                       )}
-                      <span>{logoUploading ? "Uploading to Storage..." : "Choose New Logo"}</span>
+                      <span>{logoUploading ? "Uploading to Storage..." : "Choose Custom Logo"}</span>
                       <input type="file" accept="image/*" onChange={handleLogoUpload} disabled={logoUploading} className="hidden" />
                     </label>
                     {logoUrl && (
@@ -766,7 +776,7 @@ export default function Settings({
                         onClick={handleRemoveLogo}
                         className="px-3 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-600 text-xs font-bold rounded-lg"
                       >
-                        Remove Logo
+                        Restore Default Official Logo
                       </button>
                     )}
                   </div>
@@ -783,7 +793,9 @@ export default function Settings({
                     <span>{logoUploadSuccess}</span>
                   </div>
                 )}
-                <p className="text-[10px] text-slate-400">Supported formats: JPEG, PNG, SVG (Max 1MB). Stored in Firebase Storage and rendered across Sidebar, Header, and Reports.</p>
+                <p className="text-[10px] text-slate-400">
+                  Defaults to the bundled official Ethiopian Reinsurance S.C. logo. Optionally upload a custom JPEG, PNG, or SVG (Max 1MB) to override across Sidebar, Header, Print, and PDF Reports.
+                </p>
               </div>
             </div>
 

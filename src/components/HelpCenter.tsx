@@ -1,12 +1,14 @@
 import { useState } from "react";
 import { BookOpen, UserCheck, CalendarDays, Users, Landmark, HelpCircle, PhoneCall, ShieldCheck, X } from "lucide-react";
+import { getOfficialLogoUrl } from "../utils/reportBranding";
 
 interface HelpCenterProps {
   onClose: () => void;
   companyName: string;
+  logoUrl?: string;
 }
 
-export default function HelpCenter({ onClose, companyName }: HelpCenterProps) {
+export default function HelpCenter({ onClose, companyName, logoUrl }: HelpCenterProps) {
   const [activeTab, setActiveTab] = useState("start");
 
   const menuItems = [
@@ -26,7 +28,12 @@ export default function HelpCenter({ onClose, companyName }: HelpCenterProps) {
         {/* Header */}
         <div className="bg-primary-custom text-white px-6 py-4 flex items-center justify-between border-b border-white/10">
           <div className="flex items-center gap-3">
-            <BookOpen className="h-6 w-6 text-accent-custom" />
+            <img
+              src={logoUrl || getOfficialLogoUrl()}
+              alt="Ethiopian Reinsurance S.C. Logo"
+              className="h-11 w-auto max-w-[90px] object-contain rounded shrink-0 border border-white/20"
+              referrerPolicy="no-referrer"
+            />
             <div>
               <h2 className="font-bold text-lg">Help Center &amp; User Guides</h2>
               <p className="text-xs text-white/80">{companyName} Human Resource Management System</p>
@@ -223,7 +230,18 @@ export default function HelpCenter({ onClose, companyName }: HelpCenterProps) {
 
             {activeTab === "contact" && (
               <div className="space-y-4">
-                <h3 className="text-lg font-bold text-slate-800 border-b pb-2">About Ethio-Re HRMS</h3>
+                <div className="flex items-center gap-3 border-b pb-3">
+                  <img
+                    src={logoUrl || getOfficialLogoUrl()}
+                    alt="Ethiopian Reinsurance S.C. Logo"
+                    className="h-12 w-auto max-w-[96px] object-contain rounded shrink-0"
+                    referrerPolicy="no-referrer"
+                  />
+                  <div>
+                    <h3 className="text-lg font-bold text-slate-800">About Ethio-Re HRMS</h3>
+                    <p className="text-xs text-slate-500">Ethiopian Reinsurance S.C. • Official Enterprise HRMS</p>
+                  </div>
+                </div>
                 <div className="space-y-2 text-xs">
                   <p>
                     <strong>Ethio-Re HRMS</strong> is an enterprise software solution custom built for Ethiopian Reinsurance S.C. 

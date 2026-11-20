@@ -4,6 +4,7 @@ import { Bell, HelpCircle, LogOut, User as UserIcon, Lock, Menu, X, Save, Shield
 import { useToast } from "./ui/ToastProvider";
 import { FormFieldError, ValidationSummary, fieldInputClass } from "./ui/FormFeedback";
 import { validatePasswordChangeForm, isValidEmail, isAuthorizedCompanyEmail, focusFirstInvalidField } from "../utils/validation";
+import { getOfficialLogoUrl } from "../utils/reportBranding";
 
 interface HeaderProps {
   currentUser: User | null;
@@ -166,14 +167,13 @@ export default function Header({
           <Menu className="h-6 w-6" />
         </button>
 
-        <div className="flex items-center gap-2">
-          {logoUrl ? (
-            <img src={logoUrl} alt="Logo" className="h-8 max-w-[120px] object-contain" referrerPolicy="no-referrer" />
-          ) : (
-            <div className="h-8 w-8 rounded-full bg-primary-custom flex items-center justify-center text-white font-black text-xs border border-accent-custom shadow-xs">
-              ER
-            </div>
-          )}
+        <div className="flex items-center gap-2.5">
+          <img
+            src={logoUrl || getOfficialLogoUrl()}
+            alt="Ethiopian Reinsurance S.C. Logo"
+            className="h-10 w-auto max-w-[120px] object-contain rounded shrink-0"
+            referrerPolicy="no-referrer"
+          />
           <span className="font-bold text-slate-800 text-sm md:text-base tracking-tight truncate max-w-[200px] sm:max-w-xs md:max-w-md lg:max-w-xl">
             {companyName}
           </span>

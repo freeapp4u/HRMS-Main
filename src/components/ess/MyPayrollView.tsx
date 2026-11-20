@@ -13,7 +13,7 @@ import { DollarSign, FileText, TrendingUp, Percent, Download, Lock, AlertCircle,
 import { resolveOwnEmployeeRecord, UNAUTHORIZED_EMPLOYEE_RECORD_MSG } from "../../utils/rbacUtils";
 import ReportPrintButton from "../reports/ReportPrintButton";
 import ReportPDFExportButton from "../reports/ReportPDFExportButton";
-import { formatReportDateTime, ReportExportPayload } from "../../utils/reportBranding";
+import { formatReportDateTime, getCompanyLogoUrl, ReportExportPayload } from "../../utils/reportBranding";
 
 interface MyPayrollViewProps {
   currentUser: User | null;
@@ -239,13 +239,21 @@ export default function MyPayrollView({
             {selectedPayslip ? (
               <>
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-3">
-                  <div>
-                    <h3 className="text-sm font-extrabold text-slate-800">
-                      Payslip Detail — {selectedPayslip.payrollPeriodName}
-                    </h3>
-                    <p className="text-[11px] text-slate-500">
-                      {selectedPayslip.employeeName} ({selectedPayslip.employeeId}) • {selectedPayslip.position}
-                    </p>
+                  <div className="flex items-center gap-3">
+                    <img
+                      src={getCompanyLogoUrl(companyConfig)}
+                      alt="Ethiopian Reinsurance S.C. Logo"
+                      className="h-11 w-auto max-w-[90px] object-contain rounded shrink-0"
+                      referrerPolicy="no-referrer"
+                    />
+                    <div>
+                      <h3 className="text-sm font-extrabold text-slate-800">
+                        Payslip Detail — {selectedPayslip.payrollPeriodName}
+                      </h3>
+                      <p className="text-[11px] text-slate-500">
+                        {selectedPayslip.employeeName} ({selectedPayslip.employeeId}) • {selectedPayslip.position}
+                      </p>
+                    </div>
                   </div>
                   {canExport && (
                     <div className="flex items-center gap-2">

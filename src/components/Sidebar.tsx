@@ -36,6 +36,7 @@ import {
   getModuleSubmenusForRole,
 } from "../config/permissions";
 import { hasPermission } from "../utils/rbacUtils";
+import { getRisingWithAfricaMapUrl } from "../utils/reportBranding";
 
 interface SidebarProps {
   currentUser: User | null;
@@ -47,6 +48,7 @@ interface SidebarProps {
   isOpen: boolean;
   onClose: () => void;
   companyName: string;
+  logoUrl?: string;
 }
 
 const IconMap: { [key: string]: any } = {
@@ -183,24 +185,14 @@ export default function Sidebar({
         }`}
       >
         <div className="flex flex-col flex-1 overflow-y-auto">
-          <div className="h-20 px-4 py-3 flex items-center justify-between border-b border-white/10 shrink-0 bg-[#001F44]">
-            <div className="flex items-center">
-              <div
-                className="relative p-0.5 rounded-full bg-gradient-to-tr from-[#009A44] via-[#FED100] to-[#E62529] shadow-md shrink-0 transition-transform hover:scale-105"
+          <div className="h-20 px-4 py-3 flex items-center justify-between gap-2 border-b border-white/10 shrink-0 bg-[#001F44]">
+            <div className="flex items-center min-w-0">
+              <img
+                src={getRisingWithAfricaMapUrl()}
+                alt="Rising with Africa - Glossy Blue Africa Map"
+                className="h-11 w-11 sm:h-12 sm:w-12 object-contain rounded-md shrink-0 bg-transparent"
                 title="Rising with Africa - ETRHRMS"
-              >
-                <div className="w-10 h-10 rounded-full bg-[#002B5B] flex items-center justify-center p-1.5 text-[#FED100] border border-white/20 shadow-inner">
-                  <svg
-                    viewBox="0 0 100 100"
-                    className="w-full h-full drop-shadow-xs"
-                    fill="currentColor"
-                    xmlns="http://www.w3.org/2000/svg"
-                  >
-                    <path d="M 27,20 C 33,18 42,17 52,18 C 60,19 67,17 76,21 C 80,23 77,28 74,32 C 73,36 78,39 83,42 C 88,45 89,50 85,54 C 81,58 76,60 74,64 C 72,68 66,75 62,81 C 57,87 52,89 47,86 C 44,82 46,75 44,71 C 42,67 38,64 35,60 C 31,59 27,59 23,57 C 18,54 15,49 14,44 C 13,38 16,33 20,29 C 23,26 25,23 27,20 Z" />
-                    <path d="M 81,64 C 83,66 85,72 83,78 C 81,78 79,72 81,64 Z" />
-                  </svg>
-                </div>
-              </div>
+              />
               <div className="h-8 w-px bg-white/20 mx-3 shrink-0" />
               <div className="flex flex-col justify-center text-left leading-tight shrink-0">
                 <span className="font-black italic text-sm tracking-tight text-white drop-shadow-xs">Rising</span>

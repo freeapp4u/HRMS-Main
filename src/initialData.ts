@@ -91,7 +91,7 @@ export const DEFAULT_COMPANY_CONFIG: CompanyConfig = {
     displayName: "Ethiopian Reinsurance S.C.",
     legalName: "Ethiopian Reinsurance Share Company",
     shortName: "Ethio-Re",
-    logoUrl: "", // Defaults to clean vector representation of Ethio-Re (a majestic circular golden-shield design)
+    logoUrl: "", // Defaults to the bundled official Ethiopian Reinsurance S.C. logo (public/assets/ethiore-logo.png)
     email: "info@ethiopianre.com",
     phoneNumber: "+251-115-575757",
     website: "https://www.ethiopianre.com",

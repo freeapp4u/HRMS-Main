@@ -51,6 +51,7 @@ import {
   UNAUTHORIZED_EMPLOYEE_RECORD_MSG
 } from "./utils/rbacUtils";
 import { APP_MODULES, EMPLOYEE_BLOCKED_ADMIN_MODULES, EMPLOYEE_ESS_MODULE_ORDER } from "./config/permissions";
+import { getCompanyLogoUrl, getOfficialLogoUrl } from "./utils/reportBranding";
 
 // Component Imports
 import ThemeStyles from "./components/ThemeStyles";
@@ -540,9 +541,16 @@ export default function App() {
 
   if (loading || !config) {
     return (
-      <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center text-xs font-semibold text-slate-500 gap-2">
-        <div className="h-6 w-6 border-2 border-primary-custom border-t-transparent rounded-full animate-spin"></div>
-        <span>Initializing Ethio-Re HRMS Database...</span>
+      <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center text-xs font-semibold text-slate-600 gap-3 p-6">
+        <img
+          src={getOfficialLogoUrl()}
+          alt="Ethiopian Reinsurance S.C. Logo"
+          className="h-20 w-auto object-contain rounded-lg shadow-xs"
+        />
+        <div className="flex items-center gap-2">
+          <div className="h-5 w-5 border-2 border-primary-custom border-t-transparent rounded-full animate-spin"></div>
+          <span>Initializing Ethio-Re HRMS Database...</span>
+        </div>
       </div>
     );
   }
@@ -1820,20 +1828,12 @@ export default function App() {
             {/* Top Branding Header */}
             <div className="relative z-10 flex items-center justify-between">
               <div className="flex items-center gap-3.5">
-                {config?.profile?.logoUrl ? (
-                  <img 
-                    src={config.profile.logoUrl} 
-                    alt="Ethiopian Reinsurance S.C. Logo" 
-                    className="h-12 max-w-[170px] object-contain drop-shadow-md" 
-                    referrerPolicy="no-referrer" 
-                  />
-                ) : (
-                  <div className="h-12 w-12 rounded-full bg-gradient-to-tr from-[#009A44] via-[#FED100] to-[#E62529] p-0.5 shadow-lg shrink-0">
-                    <div className="w-full h-full rounded-full bg-[#002B5B] flex items-center justify-center font-black text-[#FED100] text-sm border border-white/30">
-                      ER
-                    </div>
-                  </div>
-                )}
+                <img
+                  src={getCompanyLogoUrl(config)}
+                  alt="Ethiopian Reinsurance S.C. Logo"
+                  className="h-16 w-auto max-w-[140px] object-contain rounded-lg shadow-md shrink-0"
+                  referrerPolicy="no-referrer"
+                />
                 <div>
                   <h2 className="font-extrabold text-base md:text-lg tracking-tight text-white leading-snug">
                     Ethiopian Reinsurance S.C.
@@ -2303,7 +2303,15 @@ export default function App() {
           <div className="fixed inset-0 bg-black/70 backdrop-blur-xs flex items-center justify-center z-50 p-4">
             <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full overflow-hidden animate-in fade-in zoom-in-95 duration-150">
               <div className="bg-[#002B5B] text-white px-6 py-4 flex items-center justify-between">
-                <h3 className="font-extrabold text-sm tracking-wide">Reset ETRHRMS Security Password</h3>
+                <div className="flex items-center gap-2.5">
+                  <img
+                    src={getCompanyLogoUrl(config)}
+                    alt="Ethiopian Reinsurance S.C. Logo"
+                    className="h-8 w-auto object-contain rounded shrink-0"
+                    referrerPolicy="no-referrer"
+                  />
+                  <h3 className="font-extrabold text-sm tracking-wide">Reset ETRHRMS Security Password</h3>
+                </div>
                 <button onClick={() => setForgotPasswordModal(false)} className="text-white/80 hover:text-white">
                   <X className="h-5 w-5" />
                 </button>
@@ -2373,7 +2381,13 @@ export default function App() {
           <div className="fixed inset-0 bg-black/70 backdrop-blur-xs flex items-center justify-center z-50 p-4">
             <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full overflow-hidden animate-in fade-in zoom-in-95 duration-150">
               <div className="bg-[#002B5B] text-white px-6 py-4 flex items-center justify-between">
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2.5">
+                  <img
+                    src={getCompanyLogoUrl(config)}
+                    alt="Ethiopian Reinsurance S.C. Logo"
+                    className="h-8 w-auto object-contain rounded shrink-0"
+                    referrerPolicy="no-referrer"
+                  />
                   <ShieldCheck className="h-5 w-5 text-[#FED100]" />
                   <h3 className="font-extrabold text-sm tracking-wide">Two-Factor Authentication (MFA)</h3>
                 </div>
@@ -2587,7 +2601,7 @@ export default function App() {
       <Header
         currentUser={currentUser}
         companyName={config.profile.displayName}
-        logoUrl={config.profile.logoUrl}
+        logoUrl={getCompanyLogoUrl(config)}
         notifications={notifications}
         showHelpShortcut={!isEmployeeMode}
         onMarkNotificationRead={handleMarkNotificationRead}
@@ -2623,6 +2637,7 @@ export default function App() {
           isOpen={sidebarOpen}
           onClose={() => setSidebarOpen(false)}
           companyName={config.profile.displayName}
+          logoUrl={getCompanyLogoUrl(config)}
         />
 
         {/* Content canvas viewport */}
@@ -3028,6 +3043,7 @@ export default function App() {
                 <HelpCenter 
                   onClose={() => setActiveTab(getFirstPermittedTab())}
                   companyName={config.profile.displayName}
+                  logoUrl={getCompanyLogoUrl(config)}
                 />
               )}
             </>

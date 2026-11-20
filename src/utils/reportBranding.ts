@@ -1,27 +1,37 @@
+/// <reference types="vite/client" />
 import { CompanyConfig } from "../types";
 
 export const OFFICIAL_COMPANY_NAME = "ETHIOPIAN REINSURANCE S.C.";
 export const OFFICIAL_COMPANY_LEGAL_NAME = "Ethiopian Reinsurance Share Company";
+export const OFFICIAL_LOGO_RELATIVE_PATH = "assets/ethiore-logo.png";
+export const RISING_WITH_AFRICA_MAP_RELATIVE_PATH = "assets/glossy-blue-africa-map.png";
 
 /**
- * Official Ethio-Re vector emblem matching the application sidebar badge.
- * Used only when no custom logo URL is uploaded in Settings -> Branding Theme.
+ * Resolves a static file inside public/ using Vite's configured BASE_URL
+ * (/ in local development, /HRMS-Main/ in GitHub Pages production builds).
  */
-export const ETHIO_RE_EMBLEM_SVG = `<svg viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg">
-  <defs>
-    <linearGradient id="ethioReRing" x1="0%" y1="100%" x2="100%" y2="0%">
-      <stop offset="0%" stop-color="#009A44" />
-      <stop offset="50%" stop-color="#FED100" />
-      <stop offset="100%" stop-color="#E62529" />
-    </linearGradient>
-  </defs>
-  <circle cx="60" cy="60" r="57" fill="url(#ethioReRing)" />
-  <circle cx="60" cy="60" r="51" fill="#002B5B" stroke="#FFFFFF" stroke-width="2" />
-  <g transform="translate(10,10)" fill="#FED100">
-    <path d="M 27,20 C 33,18 42,17 52,18 C 60,19 67,17 76,21 C 80,23 77,28 74,32 C 73,36 78,39 83,42 C 88,45 89,50 85,54 C 81,58 76,60 74,64 C 72,68 66,75 62,81 C 57,87 52,89 47,86 C 44,82 46,75 44,71 C 42,67 38,64 35,60 C 31,59 27,59 23,57 C 18,54 15,49 14,44 C 13,38 16,33 20,29 C 23,26 25,23 27,20 Z" />
-    <path d="M 81,64 C 83,66 85,72 83,78 C 81,78 79,72 81,64 Z" />
-  </g>
-</svg>`;
+export function getViteAssetUrl(relativePath: string): string {
+  const rawBase = import.meta.env?.BASE_URL || "/";
+  const normalizedBase = rawBase.endsWith("/") ? rawBase : `${rawBase}/`;
+  const cleanRelative = relativePath.replace(/^\/+/, "");
+  return `${normalizedBase}${cleanRelative}`;
+}
+
+/**
+ * Returns the Vite BASE_URL-aware URL for the bundled official Ethiopian Reinsurance S.C. logo.
+ * Resolves to /assets/ethiore-logo.png in local dev and /HRMS-Main/assets/ethiore-logo.png on GitHub Pages.
+ */
+export function getOfficialLogoUrl(): string {
+  return getViteAssetUrl(OFFICIAL_LOGO_RELATIVE_PATH);
+}
+
+/**
+ * Returns the Vite BASE_URL-aware URL for the bundled Glossy Blue Africa Map emblem
+ * displayed beside the "Rising with Africa" slogan in the sidebar.
+ */
+export function getRisingWithAfricaMapUrl(): string {
+  return getViteAssetUrl(RISING_WITH_AFRICA_MAP_RELATIVE_PATH);
+}
 
 export interface ReportColumn {
   header: string;
@@ -87,14 +97,16 @@ export interface LoadedReportLogo {
 
 /**
  * Centralized company logo source resolver.
+ * Uses the custom logo configured in Settings -> Branding Theme if set,
+ * otherwise returns the bundled official Ethiopian Reinsurance S.C. logo.
  */
 export function getCompanyLogoUrl(companyConfig?: CompanyConfig, overrideLogoUrl?: string): string {
   const candidate = (overrideLogoUrl ?? companyConfig?.profile?.logoUrl ?? "").trim();
-  return candidate;
+  return candidate || getOfficialLogoUrl();
 }
 
 export function getDefaultEmblemDataUri(): string {
-  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(ETHIO_RE_EMBLEM_SVG)}`;
+  return getOfficialLogoUrl();
 }
 
 export function formatReportDateTime(date: Date = new Date()): string {
@@ -172,76 +184,94 @@ async function rasterizeDataUrlToPng(dataUrl: string, targetScale = 2): Promise<
 
 const pdfLogoCache = new Map<string, LoadedReportLogo>();
 
-/**
- * Loads the official company logo as a rasterized Data URL preserving original proportions and quality.
- * Falls back to the server proxy for Firebase Storage URLs without CORS headers, and to the
- * official Ethio-Re vector emblem only when no custom logoUrl is configured.
- */
-export async function loadReportLogoForPdf(logoUrl?: string): Promise<LoadedReportLogo> {
-  const cleanUrl = (logoUrl || "").trim();
-  const cacheKey = cleanUrl || "__DEFAULT_ETHIORE_EMBLEM__";
-  const cached = pdfLogoCache.get(cacheKey);
-  if (cached) return cached;
-
-  if (!cleanUrl) {
-    const fallback = await rasterizeDataUrlToPng(getDefaultEmblemDataUri(), 3);
-    pdfLogoCache.set(cacheKey, fallback);
-    return fallback;
+async function fetchImageUrlAsDataUrl(targetUrl: string, allowProxyFallback: boolean): Promise<string> {
+  if (targetUrl.startsWith("data:image/")) {
+    return targetUrl;
   }
 
-  let dataUrl = cleanUrl;
-  if (!cleanUrl.startsWith("data:image/")) {
-    let fetchedBlob: Blob | null = null;
-    try {
-      const directRes = await fetch(cleanUrl, { mode: "cors" });
-      if (directRes.ok) {
+  let fetchedBlob: Blob | null = null;
+  try {
+    const isSameOrigin = targetUrl.startsWith("/") || targetUrl.startsWith(window.location.origin);
+    const directRes = await fetch(targetUrl, isSameOrigin ? undefined : { mode: "cors" });
+    if (directRes.ok) {
+      const contentType = directRes.headers.get("content-type") || "";
+      if (!contentType || contentType.startsWith("image/")) {
         fetchedBlob = await directRes.blob();
       }
-    } catch {
-      // Fallback to same-origin server proxy when Firebase Storage CORS is not enabled
     }
-
-    if (!fetchedBlob) {
-      const proxyRes = await fetch(`/api/logo-proxy?url=${encodeURIComponent(cleanUrl)}`);
-      if (!proxyRes.ok) {
-        throw new Error(`Unable to load configured company logo (${proxyRes.status}).`);
-      }
-      fetchedBlob = await proxyRes.blob();
-    }
-
-    dataUrl = await blobToDataUrl(fetchedBlob);
+  } catch {
+    // Fallback to proxy when allowed
   }
 
-  // Convert SVG/WebP or normalize PNG/JPEG while preserving exact natural aspect ratio
+  if (!fetchedBlob && allowProxyFallback && /^https?:\/\//i.test(targetUrl)) {
+    const proxyRes = await fetch(`/api/logo-proxy?url=${encodeURIComponent(targetUrl)}`);
+    if (proxyRes.ok) {
+      fetchedBlob = await proxyRes.blob();
+    }
+  }
+
+  if (!fetchedBlob) {
+    throw new Error(`Unable to load logo image from ${targetUrl}`);
+  }
+
+  return blobToDataUrl(fetchedBlob);
+}
+
+async function decodeToPdfLogo(dataUrl: string): Promise<LoadedReportLogo> {
+  // Preserve native JPEG and RGBA PNG (including transparency & original dimensions)
   if (dataUrl.startsWith("data:image/jpeg") || dataUrl.startsWith("data:image/jpg")) {
     const img = await loadImageElement(dataUrl);
-    const result: LoadedReportLogo = {
+    return {
       dataUrl,
       format: "JPEG",
-      width: img.naturalWidth || 200,
+      width: img.naturalWidth || 153,
       height: img.naturalHeight || 200
     };
-    pdfLogoCache.set(cacheKey, result);
-    return result;
   }
 
   if (dataUrl.startsWith("data:image/png")) {
     const img = await loadImageElement(dataUrl);
-    const result: LoadedReportLogo = {
+    return {
       dataUrl,
       format: "PNG",
-      width: img.naturalWidth || 200,
+      width: img.naturalWidth || 153,
       height: img.naturalHeight || 200
     };
-    pdfLogoCache.set(cacheKey, result);
-    return result;
   }
 
-  // SVG / WebP / GIF -> crisp PNG preserving original ratio
-  const scale = dataUrl.startsWith("data:image/svg+xml") ? 3 : 1;
-  const converted = await rasterizeDataUrlToPng(dataUrl, scale);
-  pdfLogoCache.set(cacheKey, converted);
-  return converted;
+  // Convert SVG / WebP / GIF -> high-resolution PNG preserving exact aspect ratio & alpha
+  const scale = dataUrl.startsWith("data:image/svg+xml") ? 3 : 2;
+  return rasterizeDataUrlToPng(dataUrl, scale);
+}
+
+/**
+ * Loads the official company logo into a PDF-ready format preserving original proportions,
+ * resolution, and transparency. Falls back gracefully to the bundled official logo if a custom URL fails.
+ */
+export async function loadReportLogoForPdf(logoUrl?: string): Promise<LoadedReportLogo> {
+  const defaultOfficialUrl = getOfficialLogoUrl();
+  const cleanUrl = (logoUrl || "").trim() || defaultOfficialUrl;
+  const cached = pdfLogoCache.get(cleanUrl);
+  if (cached) return cached;
+
+  try {
+    const isCustomExternal = cleanUrl !== defaultOfficialUrl && /^https?:\/\//i.test(cleanUrl);
+    const dataUrl = await fetchImageUrlAsDataUrl(cleanUrl, isCustomExternal);
+    const result = await decodeToPdfLogo(dataUrl);
+    pdfLogoCache.set(cleanUrl, result);
+    return result;
+  } catch (err) {
+    // Graceful fallback to bundled official logo when custom URL is invalid or unreachable
+    if (cleanUrl !== defaultOfficialUrl) {
+      const defaultCached = pdfLogoCache.get(defaultOfficialUrl);
+      if (defaultCached) return defaultCached;
+      const fallbackDataUrl = await fetchImageUrlAsDataUrl(defaultOfficialUrl, false);
+      const fallbackResult = await decodeToPdfLogo(fallbackDataUrl);
+      pdfLogoCache.set(defaultOfficialUrl, fallbackResult);
+      return fallbackResult;
+    }
+    throw err;
+  }
 }
 
 /**

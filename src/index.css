@@ -105,5 +105,13 @@
   td {
     word-break: break-word;
   }
+
+  #etr-print-root img,
+  .printable-canvas img {
+    display: inline-block !important;
+    visibility: visible !important;
+    opacity: 1 !important;
+    break-inside: avoid !important;
+  }
 }
 

@@ -38,7 +38,7 @@ export async function generateReportPdf(
   customFileName?: string
 ): Promise<string> {
   const primaryRgb = hexToRgb(companyConfig?.branding?.primaryColor, [0, 43, 91]);
-  const accentRgb = hexToRgb(companyConfig?.branding?.accentColor, [212, 175, 55]);
+  const accentRgb = hexToRgb(companyConfig?.branding?.accentColor, [254, 209, 0]);
 
   const orientation = payload.payslipData
     ? "portrait"
@@ -64,9 +64,9 @@ export async function generateReportPdf(
   let cursorY = 11;
 
   // 2. Corporate Letterhead (Top Left Logo + Company Identity + Contact Info)
-  const maxLogoH = 14;
+  const maxLogoH = 17;
   const maxLogoW = 36;
-  const naturalRatio = (logoData.width || 1) / (logoData.height || 1);
+  const naturalRatio = (logoData.width || 153) / (logoData.height || 200);
   let drawH = maxLogoH;
   let drawW = drawH * naturalRatio;
   if (drawW > maxLogoW) {
@@ -116,7 +116,7 @@ export async function generateReportPdf(
     doc.text(line, pageWidth - marginX, cursorY + 4 + idx * 4.2, { align: "right" });
   });
 
-  cursorY += Math.max(maxLogoH, 15) + 2.5;
+  cursorY += Math.max(maxLogoH, 17) + 2.5;
 
   // Brand Divider (Navy + Gold)
   doc.setDrawColor(primaryRgb[0], primaryRgb[1], primaryRgb[2]);
@@ -319,7 +319,7 @@ export async function generateReportPdf(
 
     autoTable(doc, {
       startY: cursorY,
-      margin: { left: marginX, right: marginX, top: 14, bottom: 16 },
+      margin: { left: marginX, right: marginX, top: 18, bottom: 16 },
       head: [payload.columns.map((c) => c.header)],
       body:
         payload.rows.length > 0
@@ -366,7 +366,7 @@ export async function generateReportPdf(
         let nextY = ((doc as unknown as { lastAutoTable?: { finalY: number } }).lastAutoTable?.finalY || cursorY) + 7;
         if (nextY > pageHeight - 32) {
           doc.addPage();
-          nextY = 16;
+          nextY = 19;
         }
 
         doc.setFont("helvetica", "bold");
@@ -376,7 +376,7 @@ export async function generateReportPdf(
 
         autoTable(doc, {
           startY: nextY + 2.5,
-          margin: { left: marginX, right: marginX, top: 14, bottom: 16 },
+          margin: { left: marginX, right: marginX, top: 18, bottom: 16 },
           head: [extraTable.columns.map((c) => c.header)],
           body:
             extraTable.rows.length > 0
@@ -418,10 +418,28 @@ export async function generateReportPdf(
     }
   }
 
-  // 8. Page Numbers & Corporate Footer on Every Page
+  // 8. Running Page Headers (Pages 2+) & Corporate Footers on Every Page
   const totalPages = doc.getNumberOfPages();
   for (let pageIdx = 1; pageIdx <= totalPages; pageIdx++) {
     doc.setPage(pageIdx);
+
+    if (pageIdx > 1) {
+      const miniH = 7;
+      const miniW = miniH * naturalRatio;
+      doc.addImage(logoData.dataUrl, logoData.format, marginX, 5.5, miniW, miniH, undefined, "FAST");
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(8);
+      doc.setTextColor(primaryRgb[0], primaryRgb[1], primaryRgb[2]);
+      doc.text(OFFICIAL_COMPANY_NAME, marginX + miniW + 2.5, 9.2);
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(7.5);
+      doc.setTextColor(100, 116, 139);
+      doc.text(payload.reportTitle, pageWidth - marginX, 9.2, { align: "right" });
+      doc.setDrawColor(primaryRgb[0], primaryRgb[1], primaryRgb[2]);
+      doc.setLineWidth(0.35);
+      doc.line(marginX, 13.8, pageWidth - marginX, 13.8);
+    }
+
     doc.setDrawColor(226, 232, 240);
     doc.setLineWidth(0.3);
     doc.line(marginX, pageHeight - 11.5, pageWidth - marginX, pageHeight - 11.5);

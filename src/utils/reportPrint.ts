@@ -2,7 +2,6 @@ import { CompanyConfig } from "../types";
 import {
   formatReportDateTime,
   getCompanyLogoUrl,
-  getDefaultEmblemDataUri,
   OFFICIAL_COMPANY_LEGAL_NAME,
   OFFICIAL_COMPANY_NAME,
   preloadDomImages,
@@ -118,9 +117,8 @@ export async function printStructuredReport(
   companyConfig?: CompanyConfig
 ): Promise<void> {
   const primaryColor = companyConfig?.branding?.primaryColor || "#002B5B";
-  const accentColor = companyConfig?.branding?.accentColor || "#D4AF37";
-  const logoUrl = getCompanyLogoUrl(companyConfig);
-  const effectiveLogoSrc = logoUrl || getDefaultEmblemDataUri();
+  const accentColor = companyConfig?.branding?.accentColor || "#FED100";
+  const effectiveLogoSrc = getCompanyLogoUrl(companyConfig);
   const generatedAt = payload.generatedAt || formatReportDateTime();
 
   const orientation = payload.payslipData
@@ -155,10 +153,10 @@ export async function printStructuredReport(
     <div style="font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: #0f172a; font-size: 11px;">
       <div style="display: flex; justify-content: space-between; align-items: center; gap: 16px; padding-bottom: 10px; border-bottom: 3px solid ${escapeHtml(primaryColor)}; position: relative;">
         <div style="display: flex; align-items: center; gap: 12px;">
-          <img src="${escapeHtml(effectiveLogoSrc)}" alt="Ethiopian Reinsurance S.C. Logo" style="height: 52px; width: auto; max-width: 150px; object-fit: contain;" referrerpolicy="no-referrer" />
+          <img src="${escapeHtml(effectiveLogoSrc)}" alt="Ethiopian Reinsurance S.C. Logo" style="height: 58px; width: auto; max-width: 140px; object-fit: contain; display: block;" referrerpolicy="no-referrer" />
           <div>
             <div style="font-size: 15px; font-weight: 800; color: ${escapeHtml(primaryColor)}; letter-spacing: -0.01em;">${OFFICIAL_COMPANY_NAME}</div>
-            <div style="font-size: 10px; font-weight: 600; color: #475569; margin-top: 2px;">${escapeHtml(companyConfig?.profile?.legalName || OFFICIAL_COMPANY_LEGAL_NAME)} • Human Resource Management</div>
+            <div style="font-size: 10px; font-weight: 600; color: #475569; margin-top: 2px;">${escapeHtml(companyConfig?.profile?.legalName || OFFICIAL_COMPANY_LEGAL_NAME)} • Human Resource Management System</div>
             ${addressLine ? `<div style="font-size: 9px; color: #64748b; margin-top: 2px;">${addressLine}</div>` : ""}
           </div>
         </div>

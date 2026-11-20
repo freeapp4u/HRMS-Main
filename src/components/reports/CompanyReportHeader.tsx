@@ -3,7 +3,6 @@ import { CompanyConfig } from "../../types";
 import {
   formatReportDateTime,
   getCompanyLogoUrl,
-  getDefaultEmblemDataUri,
   OFFICIAL_COMPANY_LEGAL_NAME,
   OFFICIAL_COMPANY_NAME,
 } from "../../utils/reportBranding";
@@ -33,8 +32,7 @@ export default function CompanyReportHeader({
   referenceNo,
   extraMeta,
 }: CompanyReportHeaderProps) {
-  const resolvedLogoUrl = getCompanyLogoUrl(companyConfig, logoUrl);
-  const effectiveLogoSrc = resolvedLogoUrl || getDefaultEmblemDataUri();
+  const effectiveLogoSrc = getCompanyLogoUrl(companyConfig, logoUrl);
   const timestamp = generatedAt || formatReportDateTime();
 
   const legalName = companyConfig?.profile?.legalName || OFFICIAL_COMPANY_LEGAL_NAME;
@@ -63,7 +61,7 @@ export default function CompanyReportHeader({
           <img
             src={effectiveLogoSrc}
             alt="Ethiopian Reinsurance S.C. Official Logo"
-            className="h-14 w-auto max-w-[150px] object-contain shrink-0"
+            className="h-16 w-auto max-w-[140px] object-contain shrink-0 rounded"
             referrerPolicy="no-referrer"
           />
           <div>
@@ -71,7 +69,7 @@ export default function CompanyReportHeader({
               {OFFICIAL_COMPANY_NAME}
             </h1>
             <p className="text-[11px] font-bold text-slate-600">
-              {legalName} • Human Resource Management
+              {legalName} • Human Resource Management System
             </p>
             {addressLine && (
               <p className="text-[10px] text-slate-400 font-medium mt-0.5">{addressLine}</p>

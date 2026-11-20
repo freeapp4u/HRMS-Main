@@ -14,6 +14,7 @@ import {
 } from "../types";
 import { hasPermission, getDepartmentHeadManagedDeptIds, resolveOwnEmployeeRecord } from "../utils/rbacUtils";
 import { calculateEmployeeLeaveBalance } from "../utils/leaveUtils";
+import { getCompanyLogoUrl } from "../utils/reportBranding";
 import {
   Users,
   Landmark,
@@ -212,20 +213,28 @@ export default function Dashboard({
       <div className="space-y-6">
         {/* Employee Welcome Header */}
         <div className="bg-white rounded-xl border border-slate-200 p-6 flex flex-col md:flex-row justify-between items-start md:items-center gap-4 shadow-xs">
-          <div>
-            <div className="flex items-center gap-2 flex-wrap">
-              <h1 className="text-xl font-extrabold text-slate-800 tracking-tight">My Dashboard</h1>
-              {myEmpId && (
-                <span className="text-[11px] font-bold bg-[#002B5B]/10 text-[#002B5B] border border-[#002B5B]/20 px-2.5 py-0.5 rounded-full">
-                  ID: {myEmpId}
-                </span>
-              )}
+          <div className="flex items-center gap-4">
+            <img
+              src={getCompanyLogoUrl(companyConfig)}
+              alt="Ethiopian Reinsurance S.C. Logo"
+              className="h-14 w-auto max-w-[96px] object-contain rounded-lg shrink-0 shadow-2xs"
+              referrerPolicy="no-referrer"
+            />
+            <div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <h1 className="text-xl font-extrabold text-slate-800 tracking-tight">My Dashboard</h1>
+                {myEmpId && (
+                  <span className="text-[11px] font-bold bg-[#002B5B]/10 text-[#002B5B] border border-[#002B5B]/20 px-2.5 py-0.5 rounded-full">
+                    ID: {myEmpId}
+                  </span>
+                )}
+              </div>
+              <p className="text-xs text-slate-500 mt-1">
+                Welcome, <span className="font-bold text-slate-700">{ownEmp?.fullName || currentUser?.fullName}</span>
+                {ownEmp ? ` • ${ownEmp.position} (${myDept?.name || "Department"})` : ""} • Date:{" "}
+                <span className="font-bold text-slate-700">{todayStr}</span>
+              </p>
             </div>
-            <p className="text-xs text-slate-500 mt-1">
-              Welcome, <span className="font-bold text-slate-700">{ownEmp?.fullName || currentUser?.fullName}</span>
-              {ownEmp ? ` • ${ownEmp.position} (${myDept?.name || "Department"})` : ""} • Date:{" "}
-              <span className="font-bold text-slate-700">{todayStr}</span>
-            </p>
           </div>
           <div className="flex items-center gap-2">
             <span className="bg-emerald-50 text-emerald-800 border border-emerald-200 font-bold text-[11px] px-3 py-1 rounded-full">
@@ -529,11 +538,19 @@ export default function Dashboard({
     <div className="space-y-6">
       {/* Welcome Banner */}
       <div className="bg-white rounded-lg border border-slate-200 p-6 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
-        <div>
-          <h1 className="text-xl font-extrabold text-slate-800 tracking-tight">Ethio-Re Operational Dashboard</h1>
-          <p className="text-xs text-slate-500 mt-1">
-            Human Resource Management &amp; Analytics Console • Active Date: <span className="font-bold text-slate-700">{todayStr}</span>
-          </p>
+        <div className="flex items-center gap-4">
+          <img
+            src={getCompanyLogoUrl(companyConfig)}
+            alt="Ethiopian Reinsurance S.C. Logo"
+            className="h-14 w-auto max-w-[96px] object-contain rounded-lg shrink-0 shadow-2xs"
+            referrerPolicy="no-referrer"
+          />
+          <div>
+            <h1 className="text-xl font-extrabold text-slate-800 tracking-tight">Ethio-Re Operational Dashboard</h1>
+            <p className="text-xs text-slate-500 mt-1">
+              Human Resource Management &amp; Analytics Console • Active Date: <span className="font-bold text-slate-700">{todayStr}</span>
+            </p>
+          </div>
         </div>
         <div className="flex items-center gap-2">
           {role === "Auditor" && (

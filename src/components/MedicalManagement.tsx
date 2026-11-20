@@ -11,7 +11,7 @@ import ReportPDFExportButton from "./reports/ReportPDFExportButton";
 import { 
   Plus, Search, Edit, Trash2, Calendar, Check, X, Save, 
   FileSpreadsheet, RefreshCw, Calculator, Ban, Info, AlertTriangle,
-  LayoutDashboard, FileText, CheckCircle2, ShieldAlert, Clock, ArrowRight,
+  FileText, CheckCircle2, ShieldAlert, Clock, ArrowRight,
   Sliders, Settings, ChevronRight, Download, Filter, UserCheck, Layers, Award,
   HeartPulse, UserPlus, Users, DollarSign, ExternalLink, ShieldCheck, Stethoscope, Building2, Upload
 } from "lucide-react";
@@ -34,6 +34,7 @@ interface MedicalManagementProps {
   companyConfig: CompanyConfig;
   currentUser: User | null;
   initialSubTab?: string;
+  onSubTabChange?: (subTab: string) => void;
   permissions?: ModulePermission;
   onAddMedicalExpense: (record: MedicalExpense) => boolean;
   onUpdateMedicalExpense: (record: MedicalExpense) => void;
@@ -53,6 +54,7 @@ export default function MedicalManagement({
   companyConfig,
   currentUser,
   initialSubTab = "dashboard",
+  onSubTabChange,
   permissions,
   onAddMedicalExpense,
   onUpdateMedicalExpense,
@@ -94,10 +96,22 @@ export default function MedicalManagement({
   });
 
   useEffect(() => {
-    if (initialSubTab && ["dashboard", "claims", "family", "policy", "reports"].includes(initialSubTab) && canViewSub(initialSubTab)) {
+    const allowed = ["dashboard", "claims", "family", "policy", "reports"];
+    if (initialSubTab && allowed.includes(initialSubTab) && canViewSub(initialSubTab)) {
       setActiveSubTab(initialSubTab);
+    } else {
+      const firstAllowed = allowed.find(canViewSub);
+      if (firstAllowed) setActiveSubTab(firstAllowed);
     }
-  }, [initialSubTab]);
+  }, [initialSubTab, permissions]);
+
+  const changeSubTab = (subTab: string) => {
+    if (!canViewSub(subTab)) return;
+    setActiveSubTab(subTab);
+    if (onSubTabChange) {
+      onSubTabChange(subTab);
+    }
+  };
 
   // Policy configuration with fallback
   const medicalPolicy: MedicalPolicyConfig = useMemo(() => {
@@ -846,35 +860,6 @@ export default function MedicalManagement({
         </div>
       </div>
 
-      {/* Submenu Tab Bar */}
-      <div className="bg-white border-b border-slate-200 rounded-xl p-1 shadow-2xs flex items-center gap-1 overflow-x-auto text-xs font-bold">
-        {[
-          { id: "dashboard", label: "1. Medical Dashboard", icon: LayoutDashboard },
-          { id: "claims", label: "2. Expense Claims Register", icon: FileText },
-          { id: "family", label: "3. Family Members Registry", icon: Users },
-          { id: "policy", label: "4. Policy Settings", icon: Settings },
-          { id: "reports", label: "5. Medical Reports", icon: FileSpreadsheet }
-        ].map(tab => {
-          if (!canViewSub(tab.id)) return null;
-          const IconComp = tab.icon;
-          const isActive = activeSubTab === tab.id;
-          return (
-            <button
-              key={tab.id}
-              onClick={() => setActiveSubTab(tab.id)}
-              className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-all whitespace-nowrap ${
-                isActive
-                  ? "bg-primary-custom text-accent-custom shadow-xs font-extrabold"
-                  : "text-slate-600 hover:bg-slate-100"
-              }`}
-            >
-              <IconComp className="h-3.5 w-3.5 shrink-0" />
-              <span>{tab.label}</span>
-            </button>
-          );
-        })}
-      </div>
-
       {/* ========================================== */}
       {/* SUBMENU 1: MEDICAL DASHBOARD */}
       {/* ========================================== */}
@@ -951,7 +936,7 @@ export default function MedicalManagement({
                   <FileText className="h-4 w-4 text-rose-600" /> Recent Medical Expense Claims
                 </h3>
                 <button
-                  onClick={() => setActiveSubTab("claims")}
+                  onClick={() => changeSubTab("claims")}
                   className="text-xs font-bold text-sky-600 hover:underline flex items-center gap-1"
                 >
                   View All Claims <ChevronRight className="h-3 w-3" />

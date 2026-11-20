@@ -41,8 +41,10 @@ export default function NotificationsView({
   useEffect(() => {
     if (initialSubTab && visibleTabs.some((t) => t.id === initialSubTab)) {
       setActiveSubTab(initialSubTab);
+    } else if (!visibleTabs.some((t) => t.id === activeSubTab) && visibleTabs[0]) {
+      setActiveSubTab(visibleTabs[0].id);
     }
-  }, [initialSubTab]);
+  }, [initialSubTab, permissions]);
 
   const [annTitle, setAnnTitle] = useState("");
   const [annMessage, setAnnMessage] = useState("");
@@ -126,27 +128,6 @@ export default function NotificationsView({
             Personal workflow alerts and official Ethiopian Reinsurance Human Resources announcements.
           </p>
         </div>
-      </div>
-
-      {/* Submenu Tabs */}
-      <div className="flex flex-wrap gap-1.5 bg-white border border-slate-200 rounded-xl p-2 shadow-2xs">
-        {visibleTabs.map((tab) => {
-          const Icon = tab.icon;
-          const active = activeSubTab === tab.id;
-          return (
-            <button
-              key={tab.id}
-              type="button"
-              onClick={() => setActiveSubTab(tab.id)}
-              className={`px-3 py-2 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all ${
-                active ? "bg-primary-custom text-white shadow-xs" : "text-slate-600 hover:bg-slate-100"
-              }`}
-            >
-              <Icon className="h-3.5 w-3.5" />
-              <span>{tab.label}</span>
-            </button>
-          );
-        })}
       </div>
 
       {/* 1. Personal Notifications */}

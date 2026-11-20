@@ -36,6 +36,7 @@ interface HRRequestsModuleProps {
     decision: "Approved" | "Rejected",
     comments: string
   ) => Promise<boolean> | boolean;
+  onSubTabChange?: (subTab: string) => void;
 }
 
 export default function HRRequestsModule({
@@ -48,6 +49,7 @@ export default function HRRequestsModule({
   onSubmitHRRequest,
   onCancelHRRequest,
   onReviewHRRequest,
+  onSubTabChange,
 }: HRRequestsModuleProps) {
   const { showSuccess, showError } = useToast();
   const isEmployee = currentUser?.role === "Employee";
@@ -79,8 +81,17 @@ export default function HRRequestsModule({
   useEffect(() => {
     if (initialSubTab && visibleTabs.some((t) => t.id === initialSubTab)) {
       setActiveSubTab(initialSubTab);
+    } else if (!visibleTabs.some((t) => t.id === activeSubTab) && visibleTabs[0]) {
+      setActiveSubTab(visibleTabs[0].id);
     }
-  }, [initialSubTab]);
+  }, [initialSubTab, permissions]);
+
+  const changeSubTab = (subTab: string) => {
+    setActiveSubTab(subTab);
+    if (onSubTabChange) {
+      onSubTabChange(subTab);
+    }
+  };
 
   // Request submission form
   const [requestType, setRequestType] = useState<HRRequestType>("general_hr");
@@ -193,7 +204,7 @@ export default function HRRequestsModule({
         showSuccess("HR Request submitted successfully.");
         setSubject("");
         setDescription("");
-        setActiveSubTab("my_requests");
+        changeSubTab("my_requests");
       } else {
         showError("Unable to submit HR request. Please retry.");
       }
@@ -232,27 +243,6 @@ export default function HRRequestsModule({
               : "Review and approve employee HR service requests, profile updates, and attendance corrections."}
           </p>
         </div>
-      </div>
-
-      {/* Submenu Tabs */}
-      <div className="flex flex-wrap gap-1.5 bg-white border border-slate-200 rounded-xl p-2 shadow-2xs">
-        {visibleTabs.map((tab) => {
-          const Icon = tab.icon;
-          const active = activeSubTab === tab.id;
-          return (
-            <button
-              key={tab.id}
-              type="button"
-              onClick={() => setActiveSubTab(tab.id)}
-              className={`px-3 py-2 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all ${
-                active ? "bg-primary-custom text-white shadow-xs" : "text-slate-600 hover:bg-slate-100"
-              }`}
-            >
-              <Icon className="h-3.5 w-3.5" />
-              <span>{tab.label}</span>
-            </button>
-          );
-        })}
       </div>
 
       {/* HR Approval Queue (Admin / HR Officer) */}

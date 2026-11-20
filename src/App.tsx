@@ -50,7 +50,13 @@ import {
   assertEmployeeRecordAccess,
   UNAUTHORIZED_EMPLOYEE_RECORD_MSG
 } from "./utils/rbacUtils";
-import { APP_MODULES, EMPLOYEE_BLOCKED_ADMIN_MODULES, EMPLOYEE_ESS_MODULE_ORDER } from "./config/permissions";
+import {
+  parseTabPermission,
+  canAccessTab as checkCanAccessTab,
+  getFirstPermittedTab as resolveFirstPermittedTab,
+  resolveCanonicalTab
+} from "./utils/navigationUtils";
+import { EMPLOYEE_BLOCKED_ADMIN_MODULES } from "./config/permissions";
 import { getCompanyLogoUrl, getOfficialLogoUrl } from "./utils/reportBranding";
 
 // Component Imports
@@ -539,6 +545,32 @@ export default function App() {
     };
   }, [loading, currentUser?.id, currentUser?.role, currentUser?.employeeId]);
 
+  const currentRoleObj = roles.find(r => r.id === currentUser?.role || r.name === currentUser?.role);
+  const currentRolePermissions = resolveUserPermissions(currentUser, roles, rolePermissions);
+
+  // Canonicalize bare or alias module routes to their first permitted submenu so sidebar & main workspace stay 1:1 synced
+  useEffect(() => {
+    if (loading || !currentUser || !currentRolePermissions) return;
+    if (!checkCanAccessTab(activeTab, currentRolePermissions, currentUser.role, currentRoleObj?.status)) {
+      return;
+    }
+    const canonical = resolveCanonicalTab(
+      activeTab,
+      currentRolePermissions,
+      currentUser.role,
+      currentRoleObj?.status
+    );
+    if (canonical && canonical !== activeTab) {
+      setActiveTabState(canonical);
+      const rawHash = window.location.hash.replace(/^#/, "");
+      const queryPart = rawHash.includes("?") ? `?${rawHash.split("?")[1]}` : "";
+      const nextHash = `#${canonical}${queryPart}`;
+      if (window.location.hash !== nextHash) {
+        window.history.replaceState(null, "", nextHash);
+      }
+    }
+  }, [loading, currentUser?.id, currentUser?.role, currentRoleObj?.status, currentRolePermissions, activeTab]);
+
   if (loading || !config) {
     return (
       <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center text-xs font-semibold text-slate-600 gap-3 p-6">
@@ -618,9 +650,6 @@ export default function App() {
     setCurrentUser(user);
     saveState({ currentUser: user });
   };
-
-  const currentRoleObj = roles.find(r => r.id === currentUser?.role || r.name === currentUser?.role);
-  const currentRolePermissions = resolveUserPermissions(currentUser, roles, rolePermissions);
 
   const handleUpdateRoles = (newRoles: SystemRole[], deletedRoleId?: string) => {
     setRoles(newRoles);
@@ -2469,106 +2498,18 @@ export default function App() {
   }
 
   // Dynamic Route Protection & First-Permitted Tab Resolution
-  const parseTabPermission = (tabId: string): { moduleId: string; submenuId?: string } => {
-    if (tabId === "dashboard" || tabId === "departments" || tabId === "help") {
-      return { moduleId: tabId };
-    }
-    if (tabId === "employees" || tabId.startsWith("employees_")) {
-      const sub = tabId.startsWith("employees_") ? tabId.replace("employees_", "") : undefined;
-      return { moduleId: "employees", submenuId: sub };
-    }
-    if (tabId === "attendance" || tabId.startsWith("attendance_")) {
-      const sub = tabId.startsWith("attendance_") ? tabId.replace("attendance_", "") : undefined;
-      return { moduleId: "attendance", submenuId: sub };
-    }
-    if (tabId === "leaves" || tabId.startsWith("leaves_")) {
-      const sub = tabId.startsWith("leaves_") ? tabId.replace("leaves_", "") : undefined;
-      return { moduleId: "leaves", submenuId: sub };
-    }
-    if (tabId === "medical" || tabId.startsWith("medical_")) {
-      const sub = tabId.startsWith("medical_") ? tabId.replace("medical_", "") : undefined;
-      return { moduleId: "medical", submenuId: sub };
-    }
-    if (tabId === "payroll" || tabId.startsWith("payroll_")) {
-      let sub = tabId.startsWith("payroll_") ? tabId.replace("payroll_", "") : undefined;
-      if (sub === "import") sub = "csv_import";
-      if (sub === "export") sub = "csv_export";
-      return { moduleId: "payroll", submenuId: sub };
-    }
-    if (tabId === "documents" || tabId.startsWith("documents_")) {
-      const sub = tabId.startsWith("documents_") ? tabId.replace("documents_", "") : undefined;
-      return { moduleId: "documents", submenuId: sub };
-    }
-    if (tabId === "requests" || tabId.startsWith("requests_")) {
-      const sub = tabId.startsWith("requests_") ? tabId.replace("requests_", "") : undefined;
-      return { moduleId: "requests", submenuId: sub };
-    }
-    if (tabId === "notifications" || tabId.startsWith("notifications_")) {
-      const sub = tabId.startsWith("notifications_") ? tabId.replace("notifications_", "") : undefined;
-      return { moduleId: "notifications", submenuId: sub };
-    }
-    if (tabId === "account" || tabId.startsWith("account_")) {
-      const sub = tabId.startsWith("account_") ? tabId.replace("account_", "") : undefined;
-      return { moduleId: "account", submenuId: sub };
-    }
-    if (tabId === "reports" || tabId.startsWith("reports_")) {
-      const sub = tabId.startsWith("reports_") ? tabId.replace("reports_", "") : undefined;
-      return { moduleId: "reports", submenuId: sub };
-    }
-    if (tabId === "settings" || tabId.startsWith("settings_")) {
-      let sub = tabId.startsWith("settings_") ? tabId.replace("settings_", "") : undefined;
-      if (sub === "logs") return { moduleId: "reports", submenuId: "audit" };
-      if (sub === "email" || sub === "email_settings" || sub === "email_config") sub = "profile";
-      return { moduleId: "settings", submenuId: sub };
-    }
-    return { moduleId: tabId };
-  };
+  const canAccessTab = (tabId: string): boolean =>
+    checkCanAccessTab(tabId, currentRolePermissions, currentUser.role, currentRoleObj?.status);
 
-  const canAccessTab = (tabId: string): boolean => {
-    if (currentRoleObj?.status === "Inactive") return false;
-    const { moduleId, submenuId } = parseTabPermission(tabId);
-    if (currentUser.role === "Employee" && EMPLOYEE_BLOCKED_ADMIN_MODULES.has(moduleId)) {
-      return false;
-    }
-    if (!hasPermission(currentRolePermissions, moduleId, "view")) return false;
-    const modDef = APP_MODULES.find(m => m.id === moduleId);
-    if (modDef) {
-      const subs = currentUser.role === "Employee" && modDef.essSubmenus ? modDef.essSubmenus : modDef.submenus;
-      if (subs.length > 0) {
-        if (submenuId) {
-          return hasPermission(currentRolePermissions, moduleId, "view", submenuId);
-        }
-        return subs.some(s => hasPermission(currentRolePermissions, moduleId, "view", s.id));
-      }
-    }
-    return true;
-  };
-
-  const getFirstPermittedTab = (): string => {
-    if (currentUser.role === "Employee") {
-      for (const modId of EMPLOYEE_ESS_MODULE_ORDER) {
-        const mod = APP_MODULES.find(m => m.id === modId);
-        if (!mod || !hasPermission(currentRolePermissions, mod.id, "view")) continue;
-        const subs = mod.essSubmenus || mod.submenus;
-        if (subs.length === 0) return mod.id;
-        const firstSub = subs.find(s => hasPermission(currentRolePermissions, mod.id, "view", s.id));
-        if (firstSub) return `${mod.id}_${firstSub.id}`;
-      }
-      return "dashboard";
-    }
-    for (const mod of APP_MODULES) {
-      if (hasPermission(currentRolePermissions, mod.id, "view")) {
-        if (mod.submenus.length === 0) return mod.id;
-        const firstSub = mod.submenus.find(s => hasPermission(currentRolePermissions, mod.id, "view", s.id));
-        if (firstSub) return `${mod.id}_${firstSub.id}`;
-      }
-    }
-    return "help";
-  };
+  const getFirstPermittedTab = (): string =>
+    resolveFirstPermittedTab(currentRolePermissions, currentUser.role);
 
   const isEmployeeMode = currentUser.role === "Employee";
   const isRouteAuthorized = canAccessTab(activeTab);
-  const parsedRoute = parseTabPermission(activeTab);
+  const effectiveActiveTab = isRouteAuthorized
+    ? resolveCanonicalTab(activeTab, currentRolePermissions, currentUser.role, currentRoleObj?.status)
+    : activeTab;
+  const parsedRoute = parseTabPermission(effectiveActiveTab);
   const recordAccessCheck =
     requestedEmployeeId && parsedRoute.moduleId
       ? assertEmployeeRecordAccess(
@@ -2621,7 +2562,7 @@ export default function App() {
         <Sidebar
           currentUser={currentUser}
           rolePermissions={currentRolePermissions}
-          activeTab={activeTab}
+          activeTab={effectiveActiveTab}
           unreadNotificationsCount={unreadNotificationsCount}
           onLogout={handleLogout}
           onTabChange={(tabId) => {
@@ -2715,7 +2656,7 @@ export default function App() {
           ) : (
             <>
               {/* View Tab Router Switch */}
-              {activeTab === "dashboard" && (
+              {effectiveActiveTab === "dashboard" && (
                 <Dashboard
                   employees={employees}
                   departments={departments}
@@ -2743,15 +2684,15 @@ export default function App() {
                     setActiveTab("employees_enrollment");
                   }}
                   onOpenQuickRecordAttendance={() => {
-                    setActiveTab("attendance");
+                    setActiveTab(isEmployeeMode ? "attendance_daily" : "attendance");
                   }}
                   onOpenQuickRegisterLeave={() => {
-                    setActiveTab("leaves");
+                    setActiveTab(isEmployeeMode ? "leaves_apply" : "leaves_applications");
                   }}
                 />
               )}
 
-              {(activeTab === "employees" || activeTab.startsWith("employees_")) && (
+              {(effectiveActiveTab === "employees" || effectiveActiveTab.startsWith("employees_")) && (
                 isEmployeeMode ? (
                   <MyProfileView
                     currentUser={currentUser}
@@ -2760,10 +2701,11 @@ export default function App() {
                     driveAssociations={driveAssociations}
                     hrRequests={hrRequests}
                     permissions={currentRolePermissions?.modulePermissions.employees}
-                    initialSubTab={activeTab.startsWith("employees_") ? activeTab.replace("employees_", "") : "personal_info"}
+                    initialSubTab={effectiveActiveTab.startsWith("employees_") ? effectiveActiveTab.replace("employees_", "") : "personal_info"}
                     requestedEmployeeId={requestedEmployeeId}
                     onSubmitHRRequest={handleSubmitHRRequest}
                     onNavigate={setActiveTab}
+                    onSubTabChange={(sub) => setActiveTab(`employees_${sub}`)}
                   />
                 ) : (
                   <Employees
@@ -2772,7 +2714,8 @@ export default function App() {
                     familyMembers={familyMembers}
                     companyConfig={config}
                     currentUser={currentUser}
-                    initialSubTab={activeTab.startsWith("employees_") ? activeTab.replace("employees_", "") : "directory"}
+                    initialSubTab={effectiveActiveTab.startsWith("employees_") ? effectiveActiveTab.replace("employees_", "") : "directory"}
+                    onSubTabChange={(sub) => setActiveTab(`employees_${sub}`)}
                     permissions={currentRolePermissions?.modulePermissions.employees}
                     rolePermissions={currentRolePermissions}
                     driveAssociations={driveAssociations}
@@ -2786,7 +2729,7 @@ export default function App() {
                 )
               )}
 
-              {!isEmployeeMode && activeTab === "departments" && (
+              {!isEmployeeMode && effectiveActiveTab === "departments" && (
                 <Departments
                   departments={departments}
                   employees={employees}
@@ -2800,7 +2743,7 @@ export default function App() {
                 />
               )}
 
-              {(activeTab === "attendance" || activeTab.startsWith("attendance_")) && (
+              {(effectiveActiveTab === "attendance" || effectiveActiveTab.startsWith("attendance_")) && (
                 isEmployeeMode ? (
                   <MyAttendanceView
                     currentUser={currentUser}
@@ -2810,9 +2753,10 @@ export default function App() {
                     hrRequests={hrRequests}
                     companyConfig={config}
                     permissions={currentRolePermissions?.modulePermissions.attendance}
-                    initialSubTab={activeTab.startsWith("attendance_") ? activeTab.replace("attendance_", "") : "daily"}
+                    initialSubTab={effectiveActiveTab.startsWith("attendance_") ? effectiveActiveTab.replace("attendance_", "") : "daily"}
                     requestedEmployeeId={requestedEmployeeId}
                     onSubmitHRRequest={handleSubmitHRRequest}
+                    onSubTabChange={(sub) => setActiveTab(`attendance_${sub}`)}
                   />
                 ) : (
                   <Attendance
@@ -2830,7 +2774,7 @@ export default function App() {
                 )
               )}
 
-              {(activeTab === "leaves" || activeTab.startsWith("leaves_")) && (
+              {(effectiveActiveTab === "leaves" || effectiveActiveTab.startsWith("leaves_")) && (
                 isEmployeeMode ? (
                   <MyLeaveView
                     currentUser={currentUser}
@@ -2839,10 +2783,11 @@ export default function App() {
                     holidays={holidays}
                     companyConfig={config}
                     permissions={currentRolePermissions?.modulePermissions.leaves}
-                    initialSubTab={activeTab.includes("_") ? activeTab.substring(activeTab.indexOf("_") + 1) : "apply"}
+                    initialSubTab={effectiveActiveTab.includes("_") ? effectiveActiveTab.substring(effectiveActiveTab.indexOf("_") + 1) : "apply"}
                     requestedEmployeeId={requestedEmployeeId}
                     onUpdateLeaves={handleUpdateLeavesFromESS}
                     onLogAction={handleLogAction}
+                    onSubTabChange={(sub) => setActiveTab(`leaves_${sub}`)}
                   />
                 ) : (
                   <LeaveManagement
@@ -2852,7 +2797,8 @@ export default function App() {
                     holidays={holidays}
                     companyConfig={config}
                     currentUser={currentUser}
-                    initialSubTab={activeTab.includes("_") ? activeTab.split("_")[1] : "dashboard"}
+                    initialSubTab={effectiveActiveTab.includes("_") ? effectiveActiveTab.split("_")[1] : "dashboard"}
+                    onSubTabChange={(sub) => setActiveTab(`leaves_${sub}`)}
                     permissions={currentRolePermissions?.modulePermissions.leaves}
                     onAddLeave={handleAddLeave}
                     onUpdateLeave={handleUpdateLeaveRecord}
@@ -2863,7 +2809,7 @@ export default function App() {
                 )
               )}
 
-              {!isEmployeeMode && (activeTab === "medical" || activeTab.startsWith("medical_")) && (
+              {!isEmployeeMode && (effectiveActiveTab === "medical" || effectiveActiveTab.startsWith("medical_")) && (
                 <MedicalManagement
                   employees={employees}
                   departments={departments}
@@ -2871,7 +2817,8 @@ export default function App() {
                   medicalExpenses={medicalExpenses}
                   companyConfig={config}
                   currentUser={currentUser}
-                  initialSubTab={activeTab.includes("_") ? activeTab.split("_")[1] : "dashboard"}
+                  initialSubTab={effectiveActiveTab.includes("_") ? effectiveActiveTab.split("_")[1] : "dashboard"}
+                  onSubTabChange={(sub) => setActiveTab(`medical_${sub}`)}
                   permissions={currentRolePermissions?.modulePermissions.medical}
                   onAddFamilyMember={handleAddFamilyMember}
                   onUpdateFamilyMember={handleUpdateFamilyMember}
@@ -2884,7 +2831,7 @@ export default function App() {
                 />
               )}
 
-              {(activeTab === "payroll" || activeTab.startsWith("payroll_")) && (
+              {(effectiveActiveTab === "payroll" || effectiveActiveTab.startsWith("payroll_")) && (
                 isEmployeeMode ? (
                   <MyPayrollView
                     currentUser={currentUser}
@@ -2895,7 +2842,7 @@ export default function App() {
                     taxConfig={taxConfig!}
                     companyConfig={config}
                     permissions={currentRolePermissions?.modulePermissions.payroll}
-                    initialSubTab={activeTab.startsWith("payroll_") ? activeTab.replace("payroll_", "") : "payslips"}
+                    initialSubTab={effectiveActiveTab.startsWith("payroll_") ? effectiveActiveTab.replace("payroll_", "") : "payslips"}
                     requestedEmployeeId={requestedEmployeeId}
                   />
                 ) : (
@@ -2915,10 +2862,11 @@ export default function App() {
                     payrollImportLogs={payrollImportLogs}
                     payrollSettings={payrollSettings}
                     initialSubTab={
-                      activeTab.startsWith("payroll_")
-                        ? (activeTab.replace("payroll_", "") === "import" ? "csv_import" : activeTab.replace("payroll_", "") === "export" ? "csv_export" : activeTab.replace("payroll_", ""))
+                      effectiveActiveTab.startsWith("payroll_")
+                        ? (effectiveActiveTab.replace("payroll_", "") === "import" ? "csv_import" : effectiveActiveTab.replace("payroll_", "") === "export" ? "csv_export" : effectiveActiveTab.replace("payroll_", ""))
                         : "dashboard"
                     }
+                    onSubTabChange={(sub) => setActiveTab(`payroll_${sub}`)}
                     permissions={currentRolePermissions?.modulePermissions.payroll}
                     emailLogs={emailLogs}
                     onUpdateComponents={handleUpdateSalaryComponents}
@@ -2942,7 +2890,7 @@ export default function App() {
               )}
 
               {/* Map sidebar settings direct nodes to setting panels */}
-              {!isEmployeeMode && (activeTab === "settings" || activeTab.startsWith("settings_")) && (
+              {!isEmployeeMode && (effectiveActiveTab === "settings" || effectiveActiveTab.startsWith("settings_")) && (
                 <Settings
                   config={config}
                   users={users}
@@ -2950,7 +2898,7 @@ export default function App() {
                   holidays={holidays}
                   emailLogs={emailLogs}
                   currentUser={currentUser}
-                  initialSubTab={activeTab.includes("_") ? activeTab.substring(activeTab.indexOf("_") + 1) : "profile"}
+                  initialSubTab={effectiveActiveTab.includes("_") ? effectiveActiveTab.substring(effectiveActiveTab.indexOf("_") + 1) : "profile"}
                   permissions={currentRolePermissions?.modulePermissions.settings}
                   roles={roles}
                   rolePermissions={rolePermissions}
@@ -2966,7 +2914,7 @@ export default function App() {
                 />
               )}
 
-              {!isEmployeeMode && (activeTab === "reports" || activeTab.startsWith("reports_")) && (
+              {!isEmployeeMode && (effectiveActiveTab === "reports" || effectiveActiveTab.startsWith("reports_")) && (
                 <Reports
                   employees={employees}
                   departments={departments}
@@ -2975,19 +2923,19 @@ export default function App() {
                   auditLogs={logs}
                   config={config}
                   currentUser={currentUser}
-                  initialSubTab={activeTab.startsWith("reports_") ? activeTab.replace("reports_", "") : "directory"}
+                  initialSubTab={effectiveActiveTab.startsWith("reports_") ? effectiveActiveTab.replace("reports_", "") : "directory"}
                   permissions={currentRolePermissions?.modulePermissions.reports}
                 />
               )}
 
-              {(activeTab === "documents" || activeTab.startsWith("documents_")) && (
+              {(effectiveActiveTab === "documents" || effectiveActiveTab.startsWith("documents_")) && (
                 isEmployeeMode ? (
                   <MyDocumentsView
                     currentUser={currentUser}
                     employees={employees}
                     driveAssociations={driveAssociations}
                     permissions={currentRolePermissions?.modulePermissions.documents}
-                    initialSubTab={activeTab.startsWith("documents_") ? activeTab.replace("documents_", "") : "employment_contract"}
+                    initialSubTab={effectiveActiveTab.startsWith("documents_") ? effectiveActiveTab.replace("documents_", "") : "employment_contract"}
                     requestedEmployeeId={requestedEmployeeId}
                   />
                 ) : (
@@ -3004,13 +2952,14 @@ export default function App() {
                 )
               )}
 
-              {(activeTab === "requests" || activeTab.startsWith("requests_")) && (
+              {(effectiveActiveTab === "requests" || effectiveActiveTab.startsWith("requests_")) && (
                 <HRRequestsModule
                   currentUser={currentUser}
                   employees={employees}
                   hrRequests={hrRequests}
                   permissions={currentRolePermissions?.modulePermissions.requests}
-                  initialSubTab={activeTab.startsWith("requests_") ? activeTab.replace("requests_", "") : undefined}
+                  initialSubTab={effectiveActiveTab.startsWith("requests_") ? effectiveActiveTab.replace("requests_", "") : undefined}
+                  onSubTabChange={(sub) => setActiveTab(`requests_${sub}`)}
                   requestedEmployeeId={requestedEmployeeId}
                   onSubmitHRRequest={handleSubmitHRRequest}
                   onCancelHRRequest={handleCancelHRRequest}
@@ -3018,28 +2967,28 @@ export default function App() {
                 />
               )}
 
-              {(activeTab === "notifications" || activeTab.startsWith("notifications_")) && (
+              {(effectiveActiveTab === "notifications" || effectiveActiveTab.startsWith("notifications_")) && (
                 <NotificationsView
                   currentUser={currentUser}
                   notifications={notifications}
                   permissions={currentRolePermissions?.modulePermissions.notifications}
-                  initialSubTab={activeTab.startsWith("notifications_") ? activeTab.replace("notifications_", "") : "personal"}
+                  initialSubTab={effectiveActiveTab.startsWith("notifications_") ? effectiveActiveTab.replace("notifications_", "") : "personal"}
                   onMarkRead={handleMarkNotificationRead}
                   onPublishAnnouncement={!isEmployeeMode ? handlePublishAnnouncement : undefined}
                 />
               )}
 
-              {(activeTab === "account" || activeTab.startsWith("account_")) && (
+              {(effectiveActiveTab === "account" || effectiveActiveTab.startsWith("account_")) && (
                 <MyAccountView
                   currentUser={currentUser}
                   permissions={currentRolePermissions?.modulePermissions.account}
-                  initialSubTab={activeTab.startsWith("account_") ? activeTab.replace("account_", "") : "change_password"}
+                  initialSubTab={effectiveActiveTab.startsWith("account_") ? effectiveActiveTab.replace("account_", "") : "change_password"}
                   onUpdateOwnPassword={handleUpdateOwnPassword}
                   onLogout={handleLogout}
                 />
               )}
 
-              {!isEmployeeMode && activeTab === "help" && (
+              {!isEmployeeMode && effectiveActiveTab === "help" && (
                 <HelpCenter 
                   onClose={() => setActiveTab(getFirstPermittedTab())}
                   companyName={config.profile.displayName}

@@ -1976,40 +1976,6 @@ export default function PayrollManagement({
         </div>
       </div>
 
-      {/* 3. 10-SUBMENU ACCORDION TAB NAVIGATION */}
-      <div className="bg-white border-b border-slate-200 rounded-xl p-1 shadow-2xs flex items-center gap-1 overflow-x-auto text-xs font-bold">
-        {[
-          { id: "dashboard", label: "1. Dashboard", icon: TrendingUp },
-          { id: "config", label: "2. Configuration", icon: Sliders },
-          { id: "salary_setup", label: "3. Employee Salary Setup", icon: Users },
-          { id: "processing", label: "4. Payroll Processing", icon: Calculator },
-          { id: "approval", label: "5. Payroll Approval", icon: ShieldCheck },
-          { id: "payslips", label: "6. Payslip Management", icon: FileText },
-          { id: "csv_import", label: "7. CSV Import", icon: Upload },
-          { id: "csv_export", label: "8. CSV Export", icon: Download },
-          { id: "reports", label: "9. Payroll Reports", icon: FileSpreadsheet },
-          { id: "history", label: "10. Payroll History", icon: History }
-        ].map(tab => {
-          if (!canViewSub(tab.id)) return null;
-          const IconComp = tab.icon;
-          const isActive = activeSubTab === tab.id;
-          return (
-            <button
-              key={tab.id}
-              onClick={() => changeSubTab(tab.id)}
-              className={`flex items-center gap-2 px-3.5 py-2 rounded-lg transition-all whitespace-nowrap ${
-                isActive
-                  ? "bg-primary-custom text-accent-custom shadow-xs font-extrabold"
-                  : "text-slate-600 hover:bg-slate-100"
-              }`}
-            >
-              <IconComp className="h-3.5 w-3.5 shrink-0" />
-              <span>{tab.label}</span>
-            </button>
-          );
-        })}
-      </div>
-
       {/* ========================================== */}
       {/* SUBMENU 1: PAYROLL DASHBOARD */}
       {/* ========================================== */}

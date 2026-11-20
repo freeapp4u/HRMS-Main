@@ -29,6 +29,7 @@ interface MyAttendanceViewProps {
   initialSubTab?: string;
   requestedEmployeeId?: string | null;
   onSubmitHRRequest: (req: HRRequest) => Promise<boolean> | boolean;
+  onSubTabChange?: (subTab: string) => void;
 }
 
 const SUBTABS = [
@@ -49,6 +50,7 @@ export default function MyAttendanceView({
   initialSubTab,
   requestedEmployeeId,
   onSubmitHRRequest,
+  onSubTabChange,
 }: MyAttendanceViewProps) {
   const { showSuccess, showError } = useToast();
   const canExport = permissions ? permissions.actions.export : false;
@@ -71,8 +73,17 @@ export default function MyAttendanceView({
   useEffect(() => {
     if (initialSubTab && visibleTabs.some((t) => t.id === initialSubTab)) {
       setActiveSubTab(initialSubTab);
+    } else if (!visibleTabs.some((t) => t.id === activeSubTab) && visibleTabs[0]) {
+      setActiveSubTab(visibleTabs[0].id);
     }
-  }, [initialSubTab]);
+  }, [initialSubTab, permissions]);
+
+  const changeSubTab = (subTab: string) => {
+    setActiveSubTab(subTab);
+    if (onSubTabChange) {
+      onSubTabChange(subTab);
+    }
+  };
 
   const todayIso = new Date().toISOString().split("T")[0];
   const [selectedDate, setSelectedDate] = useState(todayIso);
@@ -252,27 +263,6 @@ export default function MyAttendanceView({
         )}
       </div>
 
-      {/* Submenu Tabs */}
-      <div className="flex flex-wrap gap-1.5 bg-white border border-slate-200 rounded-xl p-2 shadow-2xs">
-        {visibleTabs.map((tab) => {
-          const Icon = tab.icon;
-          const active = activeSubTab === tab.id;
-          return (
-            <button
-              key={tab.id}
-              type="button"
-              onClick={() => setActiveSubTab(tab.id)}
-              className={`px-3 py-2 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all ${
-                active ? "bg-primary-custom text-white shadow-xs" : "text-slate-600 hover:bg-slate-100"
-              }`}
-            >
-              <Icon className="h-3.5 w-3.5" />
-              <span>{tab.label}</span>
-            </button>
-          );
-        })}
-      </div>
-
       {/* 1. Daily Attendance */}
       {activeSubTab === "daily" && (
         <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-4 shadow-2xs">
@@ -317,7 +307,7 @@ export default function MyAttendanceView({
                   type="button"
                   onClick={() => {
                     setCorrDate(selectedDate);
-                    setActiveSubTab("correction");
+                    changeSubTab("correction");
                   }}
                   className="text-primary-custom font-bold hover:underline"
                 >

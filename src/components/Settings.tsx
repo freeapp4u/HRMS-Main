@@ -81,16 +81,19 @@ export default function Settings({
   const [activeSubTab, setActiveSubTab] = useState(() => {
     let init = initialSubTab || allowedSubTabs[0]?.id || "profile";
     if (init === "email" || init === "email_settings" || init === "email_config") init = "profile";
-    return init;
+    if (allowedSubTabs.some(item => item.id === init)) return init;
+    return allowedSubTabs[0]?.id || "profile";
   });
 
   useEffect(() => {
-    if (initialSubTab) {
-      let mapped = initialSubTab;
-      if (mapped === "email" || mapped === "email_settings" || mapped === "email_config") mapped = "profile";
+    let mapped = initialSubTab || allowedSubTabs[0]?.id || "profile";
+    if (mapped === "email" || mapped === "email_settings" || mapped === "email_config") mapped = "profile";
+    if (allowedSubTabs.some(item => item.id === mapped)) {
       setActiveSubTab(mapped);
+    } else if (allowedSubTabs[0]) {
+      setActiveSubTab(allowedSubTabs[0].id);
     }
-  }, [initialSubTab]);
+  }, [initialSubTab, permissions]);
 
   // --- 1. Company Profile Form States ---
   const [displayName, setDisplayName] = useState(config.profile.displayName);
@@ -550,31 +553,9 @@ export default function Settings({
   };
 
   return (
-    <div className="flex flex-col lg:flex-row gap-6">
-      {/* Sub-menu Navigation Sidebar */}
-      <div className="w-full lg:w-56 shrink-0 flex flex-row lg:flex-col gap-1 overflow-x-auto lg:overflow-x-visible pb-2 lg:pb-0 border-b lg:border-b-0 lg:border-r border-slate-200 pr-0 lg:pr-4">
-        {allowedSubTabs.map(item => {
-          const Icon = item.icon;
-          const isActive = activeSubTab === item.id;
-          return (
-            <button
-              key={item.id}
-              onClick={() => setActiveSubTab(item.id)}
-              className={`whitespace-nowrap lg:w-full text-left px-3 py-2 rounded-lg flex items-center gap-2 text-xs font-bold transition-all ${
-                isActive 
-                  ? "bg-primary-custom text-white shadow-xs" 
-                  : "text-slate-600 hover:bg-slate-100"
-              }`}
-            >
-              <Icon className="h-4 w-4 shrink-0" />
-              {item.label}
-            </button>
-          );
-        })}
-      </div>
-
+    <div className="w-full">
       {/* Main Form Fields Container */}
-      <div className="flex-1 bg-white border border-slate-200 rounded-lg p-6 shadow-2xs">
+      <div className="bg-white border border-slate-200 rounded-lg p-6 shadow-2xs">
         
         {/* TAB 1: COMPANY PROFILE */}
         {activeSubTab === "profile" && (

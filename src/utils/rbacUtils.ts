@@ -278,6 +278,7 @@ export const getDefaultRolePermissions = (roleId: string): RolePermissions => {
     modulePermissions.reports.actions = getReadOnlyActions();
     modulePermissions.reports.submenus = {
       directory: true,
+      statistics: true,
       leaves: true,
       attendance: true,
       audit: false,
@@ -406,6 +407,7 @@ export const getDefaultRolePermissions = (roleId: string): RolePermissions => {
     modulePermissions.reports.actions = getReadOnlyActions();
     modulePermissions.reports.submenus = {
       directory: true,
+      statistics: true,
       leaves: true,
       attendance: true,
       audit: false,
@@ -603,9 +605,19 @@ export const normalizeRolePermissions = (
         export: Boolean(existingMod.actions?.export),
       };
       Object.keys(normalized[moduleId].submenus).forEach((subId) => {
-        normalized[moduleId].submenus[subId] = Boolean(
-          existingMod.submenus?.[subId]
-        );
+        if (
+          moduleId === "reports" &&
+          subId === "statistics" &&
+          existingMod.submenus?.statistics === undefined
+        ) {
+          normalized[moduleId].submenus[subId] = Boolean(
+            existingMod.submenus?.directory
+          );
+        } else {
+          normalized[moduleId].submenus[subId] = Boolean(
+            existingMod.submenus?.[subId]
+          );
+        }
       });
     } else if (defaultForRole.modulePermissions[moduleId]) {
       // Seed newly introduced modules (requests, notifications, account) cleanly onto older Firestore docs

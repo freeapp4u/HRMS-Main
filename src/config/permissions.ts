@@ -180,6 +180,7 @@ export const APP_MODULES: ModuleConfig[] = [
     icon: "FileSpreadsheet",
     submenus: [
       { id: "directory", name: "Directory Report" },
+      { id: "statistics", name: "Employee Statistics" },
       { id: "leaves", name: "Leave Report" },
       { id: "attendance", name: "Attendance Report" },
       { id: "audit", name: "Audit Logs" }

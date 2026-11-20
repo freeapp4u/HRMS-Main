@@ -56,8 +56,10 @@ export default function Reports({
   useEffect(() => {
     if (initialSubTab && canViewSub(initialSubTab)) {
       setActiveReportTab(initialSubTab);
+    } else if (!canViewSub(activeReportTab) && allowedSubTabs[0]) {
+      setActiveReportTab(allowedSubTabs[0]);
     }
-  }, [initialSubTab]);
+  }, [initialSubTab, permissions]);
 
   // --- Role-based data scoping ---
   const isEmployee = currentUser?.role === "Employee" || permissions?.dataScope === "own";
@@ -529,75 +531,50 @@ export default function Reports({
 
   return (
     <div className="space-y-6">
-      {/* Tab Selectors & Global Export Toolbar */}
-      <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4 no-print">
-        <div className="flex flex-wrap gap-1 border-b pb-1 w-full lg:w-auto">
-          {canViewSub("directory") && (
-            <button
-              onClick={() => setActiveReportTab("directory")}
-              className={`px-3.5 py-2 text-xs font-bold rounded-lg flex items-center gap-1.5 transition-all ${
-                activeReportTab === "directory"
-                  ? "bg-primary-custom text-white shadow-xs"
-                  : "text-slate-600 hover:bg-slate-50"
-              }`}
-            >
-              <Users className="h-4 w-4" />
-              <span>Employee Directory</span>
-            </button>
-          )}
-          {canViewSub("statistics") && (
-            <button
-              onClick={() => setActiveReportTab("statistics")}
-              className={`px-3.5 py-2 text-xs font-bold rounded-lg flex items-center gap-1.5 transition-all ${
-                activeReportTab === "statistics"
-                  ? "bg-primary-custom text-white shadow-xs"
-                  : "text-slate-600 hover:bg-slate-50"
-              }`}
-            >
-              <BarChart3 className="h-4 w-4" />
-              <span>Employee Statistics</span>
-            </button>
-          )}
-          {canViewSub("leaves") && (
-            <button
-              onClick={() => setActiveReportTab("leaves")}
-              className={`px-3.5 py-2 text-xs font-bold rounded-lg flex items-center gap-1.5 transition-all ${
-                activeReportTab === "leaves"
-                  ? "bg-primary-custom text-white shadow-xs"
-                  : "text-slate-600 hover:bg-slate-50"
-              }`}
-            >
-              <Calendar className="h-4 w-4" />
-              <span>Leave Utilization</span>
-            </button>
-          )}
-          {canViewSub("attendance") && (
-            <button
-              onClick={() => setActiveReportTab("attendance")}
-              className={`px-3.5 py-2 text-xs font-bold rounded-lg flex items-center gap-1.5 transition-all ${
-                activeReportTab === "attendance"
-                  ? "bg-primary-custom text-white shadow-xs"
-                  : "text-slate-600 hover:bg-slate-50"
-              }`}
-            >
-              <Clock className="h-4 w-4" />
-              <span>Attendance &amp; Lateness</span>
-            </button>
-          )}
-          {canViewSub("audit") && (
-            <button
-              onClick={() => setActiveReportTab("audit")}
-              className={`px-3.5 py-2 text-xs font-bold rounded-lg flex items-center gap-1.5 transition-all ${
-                activeReportTab === "audit"
-                  ? "bg-primary-custom text-white shadow-xs"
-                  : "text-slate-600 hover:bg-slate-50"
-              }`}
-            >
-              <ShieldCheck className="h-4 w-4" />
-              <span>Activity Audit Logs</span>
-            </button>
-          )}
-        </div>
+      {/* Active Report Header & Global Export Toolbar */}
+      <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-2xs flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 no-print">
+        {(() => {
+          const metaMap: Record<string, { title: string; subtitle: string; icon: any }> = {
+            directory: {
+              title: "Employee Directory Report",
+              subtitle: "Filterable personnel register and tenure analytics",
+              icon: Users,
+            },
+            statistics: {
+              title: "Employee Statistics",
+              subtitle: "Workforce demographics, gender ratios, and departmental distribution",
+              icon: BarChart3,
+            },
+            leaves: {
+              title: "Leave Utilization Report",
+              subtitle: "Approved and active leave days utilization tracking",
+              icon: Calendar,
+            },
+            attendance: {
+              title: "Attendance & Lateness Report",
+              subtitle: "Daily check-in punctuality and attendance analytics",
+              icon: Clock,
+            },
+            audit: {
+              title: "Activity Audit Logs",
+              subtitle: "System-wide security and operational audit trail",
+              icon: ShieldCheck,
+            },
+          };
+          const meta = metaMap[activeReportTab] || metaMap.directory;
+          const IconComp = meta.icon;
+          return (
+            <div className="flex items-center gap-3">
+              <div className="p-2.5 bg-primary-custom text-white rounded-xl shadow-xs shrink-0">
+                <IconComp className="h-5 w-5 text-accent-custom" />
+              </div>
+              <div>
+                <h1 className="text-base font-extrabold text-slate-800">{meta.title}</h1>
+                <p className="text-[11px] text-slate-500">{meta.subtitle}</p>
+              </div>
+            </div>
+          );
+        })()}
 
         {/* Consistent Report Toolbar: Print | Export PDF | Export Excel */}
         {canExport && (

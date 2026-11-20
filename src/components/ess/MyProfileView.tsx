@@ -35,6 +35,7 @@ interface MyProfileViewProps {
   requestedEmployeeId?: string | null;
   onSubmitHRRequest: (req: HRRequest) => Promise<boolean> | boolean;
   onNavigate?: (tabId: string) => void;
+  onSubTabChange?: (subTab: string) => void;
 }
 
 const SUBTABS = [
@@ -57,6 +58,7 @@ export default function MyProfileView({
   requestedEmployeeId,
   onSubmitHRRequest,
   onNavigate,
+  onSubTabChange,
 }: MyProfileViewProps) {
   const { showSuccess, showError } = useToast();
 
@@ -78,8 +80,17 @@ export default function MyProfileView({
   useEffect(() => {
     if (initialSubTab && visibleTabs.some((t) => t.id === initialSubTab)) {
       setActiveSubTab(initialSubTab);
+    } else if (!visibleTabs.some((t) => t.id === activeSubTab) && visibleTabs[0]) {
+      setActiveSubTab(visibleTabs[0].id);
     }
-  }, [initialSubTab]);
+  }, [initialSubTab, permissions]);
+
+  const changeSubTab = (subTab: string) => {
+    setActiveSubTab(subTab);
+    if (onSubTabChange) {
+      onSubTabChange(subTab);
+    }
+  };
 
   const [phoneNumber, setPhoneNumber] = useState(myEmployee?.phoneNumber || "");
   const [altPhoneNumber, setAltPhoneNumber] = useState(myEmployee?.altPhoneNumber || "");
@@ -211,29 +222,6 @@ export default function MyProfileView({
         </div>
       </div>
 
-      {/* Submenu Tabs */}
-      <div className="flex flex-wrap gap-1.5 bg-white border border-slate-200 rounded-xl p-2 shadow-2xs">
-        {visibleTabs.map((tab) => {
-          const Icon = tab.icon;
-          const active = activeSubTab === tab.id;
-          return (
-            <button
-              key={tab.id}
-              type="button"
-              onClick={() => setActiveSubTab(tab.id)}
-              className={`px-3 py-2 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all ${
-                active
-                  ? "bg-primary-custom text-white shadow-xs"
-                  : "text-slate-600 hover:bg-slate-100"
-              }`}
-            >
-              <Icon className="h-3.5 w-3.5" />
-              <span>{tab.label}</span>
-            </button>
-          );
-        })}
-      </div>
-
       {/* 1. Personal Information */}
       {activeSubTab === "personal_info" && (
         <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-5 shadow-2xs">
@@ -333,7 +321,7 @@ export default function MyProfileView({
             {visibleTabs.some((t) => t.id === "request_update") && (
               <button
                 type="button"
-                onClick={() => setActiveSubTab("request_update")}
+                onClick={() => changeSubTab("request_update")}
                 className="px-3 py-1.5 bg-primary-custom text-white text-xs font-bold rounded-lg hover:opacity-95 flex items-center gap-1.5"
               >
                 <Send className="h-3.5 w-3.5" />

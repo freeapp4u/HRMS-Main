@@ -12,7 +12,7 @@ import ReportPDFExportButton from "./reports/ReportPDFExportButton";
 import { 
   Plus, Search, Edit, Trash2, Calendar, CalendarDays, Check, X, Save, 
   FileSpreadsheet, RefreshCw, Calculator, Ban, Info, AlertTriangle,
-  LayoutDashboard, FileText, CheckCircle2, ShieldAlert, Clock, ArrowRight,
+  FileText, CheckCircle2, ShieldAlert, Clock, ArrowRight,
   Sliders, Settings, ChevronRight, Download, Filter, UserCheck, Layers, Award, ShieldCheck, Upload, ExternalLink
 } from "lucide-react";
 import { uploadFileToStorage } from "../firebase";
@@ -35,6 +35,7 @@ interface LeaveManagementProps {
   companyConfig: CompanyConfig;
   currentUser: User | null;
   initialSubTab?: string;
+  onSubTabChange?: (subTab: string) => void;
   permissions?: ModulePermission;
   onAddLeave: (record: LeaveRecord) => boolean;
   onUpdateLeave: (record: LeaveRecord) => void;
@@ -51,6 +52,7 @@ export default function LeaveManagement({
   companyConfig,
   currentUser,
   initialSubTab = "dashboard",
+  onSubTabChange,
   permissions,
   onAddLeave,
   onUpdateLeave,
@@ -101,10 +103,22 @@ export default function LeaveManagement({
   });
 
   useEffect(() => {
-    if (initialSubTab && ["dashboard", "applications", "balances", "calendar", "config", "reports"].includes(initialSubTab) && canViewSub(initialSubTab)) {
+    const allowed = ["dashboard", "applications", "balances", "calendar", "config", "reports"];
+    if (initialSubTab && allowed.includes(initialSubTab) && canViewSub(initialSubTab)) {
       setActiveSubTab(initialSubTab);
+    } else {
+      const firstAllowed = allowed.find(canViewSub);
+      if (firstAllowed) setActiveSubTab(firstAllowed);
     }
-  }, [initialSubTab]);
+  }, [initialSubTab, permissions]);
+
+  const changeSubTab = (subTab: string) => {
+    if (!canViewSub(subTab)) return;
+    setActiveSubTab(subTab);
+    if (onSubTabChange) {
+      onSubTabChange(subTab);
+    }
+  };
 
   // System Configurations with Fallbacks
   const leaveTypesConfig: LeaveTypeConfig[] = useMemo(() => {
@@ -1296,7 +1310,7 @@ export default function LeaveManagement({
           {canApprove && canViewSub("config") && (
             <button
               onClick={() => {
-                setActiveSubTab("config");
+                changeSubTab("config");
                 setYearEndModalOpen(true);
               }}
               className="px-3 py-1.5 bg-amber-500 hover:bg-amber-600 text-slate-900 text-xs font-bold rounded-lg transition-all flex items-center gap-1.5 shadow-2xs"
@@ -1315,36 +1329,6 @@ export default function LeaveManagement({
             </button>
           )}
         </div>
-      </div>
-
-      {/* Submenu Tab Bar */}
-      <div className="bg-white border-b border-slate-200 rounded-xl p-1 shadow-2xs flex items-center gap-1 overflow-x-auto text-xs font-bold">
-        {[
-          { id: "dashboard", label: "1. Leave Dashboard", icon: LayoutDashboard },
-          { id: "applications", label: "2. Leave Applications", icon: FileText },
-          { id: "balances", label: "3. Leave Balances", icon: Award },
-          { id: "calendar", label: "4. Leave Calendar", icon: Calendar },
-          { id: "config", label: "5. Leave Configuration", icon: Settings },
-          { id: "reports", label: "6. Leave Reports", icon: FileSpreadsheet }
-        ].map(tab => {
-          if (!canViewSub(tab.id)) return null;
-          const IconComp = tab.icon;
-          const isActive = activeSubTab === tab.id;
-          return (
-            <button
-              key={tab.id}
-              onClick={() => setActiveSubTab(tab.id)}
-              className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-all whitespace-nowrap ${
-                isActive
-                  ? "bg-primary-custom text-accent-custom shadow-xs font-extrabold"
-                  : "text-slate-600 hover:bg-slate-100"
-              }`}
-            >
-              <IconComp className="h-3.5 w-3.5 shrink-0" />
-              <span>{tab.label}</span>
-            </button>
-          );
-        })}
       </div>
 
       {/* ========================================== */}
@@ -1414,7 +1398,7 @@ export default function LeaveManagement({
                   <UserCheck className="h-4 w-4 text-emerald-600" /> Currently Active Leave Roster
                 </h3>
                 <button
-                  onClick={() => setActiveSubTab("applications")}
+                  onClick={() => changeSubTab("applications")}
                   className="text-xs font-bold text-sky-600 hover:underline flex items-center gap-1"
                 >
                   View All Applications <ChevronRight className="h-3 w-3" />
